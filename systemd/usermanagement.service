@@ -1,0 +1,29 @@
+[Unit]
+Description=WhereHaveIBeen UserManagement API
+After=network.target nginx.service
+Wants=nginx.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/usermanagement
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Load environment variables from .env file
+EnvironmentFile=/opt/usermanagement/.env
+
+# Run the application
+ExecStart=/usr/bin/python3 /opt/usermanagement/app.py
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=usermanagement-api
+
+[Install]
+WantedBy=multi-user.target
