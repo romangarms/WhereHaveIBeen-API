@@ -9,130 +9,136 @@ This API server sits between the WhereHaveIBeen frontend and OwnTracks Recorder 
 1. **User Registration** - Allow new users to create accounts dynamically
 2. **Authentication** - JWT-based authentication for secure API access
 3. **Privacy Enforcement** - Ensure users can ONLY access their own location data
-4. **Dynamic User Management** - Add users to OwnTracks htpasswd without service restart
+4. **ForwardAuth** - Traefik middleware authentication against SQLite database
 
 ## Architecture
 
 ```
-WhereHaveIBeen (Fly.io) → UserManagementAPI (Linux Server) → OwnTracks Recorder (localhost)
+                      mini.romangarms.com (HTTPS)
+                                |
+                             Traefik
+                            /        \
+                /api/*              /pub, /api/0/*
+                (no auth)           (ForwardAuth)
+                    |                    |
+          UserManagementAPI      OwnTracks Recorder
+           (registration,         (location data,
+            login, proxy)          mobile app)
 ```
 
-The API validates JWT tokens and forces the `user` parameter to match the authenticated user, preventing users from querying other users' location data.
+**Routing:**
+- `/api/register`, `/api/login`, `/api/locations`, `/api/last` → UserManagementAPI (handles its own auth)
+- `/auth/verify` → UserManagementAPI (ForwardAuth endpoint, internal only)
+- `/pub`, `/api/0/*` → OwnTracks Recorder (protected by ForwardAuth)
+
+**Key Benefits:**
+- Single external endpoint (no extra port needed)
+- Dynamic user registration - users can authenticate immediately (no restart)
+- All authentication against SQLite database
 
 ## Features
 
-- ✅ User registration with password validation
-- ✅ JWT-based authentication (30-day token expiry)
-- ✅ Privacy-enforcing proxy to OwnTracks `/api/0/locations` endpoint
-- ✅ Privacy-enforcing proxy to OwnTracks `/api/0/last` endpoint
-- ✅ Dynamic OwnTracks htpasswd file management
-- ✅ Rate limiting to prevent brute force attacks
-- ✅ bcrypt password hashing
-- ✅ SQLite database for user accounts
+- User registration with password validation
+- JWT-based authentication (30-day token expiry)
+- Privacy-enforcing proxy to OwnTracks `/api/0/locations` endpoint
+- Privacy-enforcing proxy to OwnTracks `/api/0/last` endpoint
+- ForwardAuth endpoint for Traefik middleware
+- Rate limiting to prevent brute force attacks
+- bcrypt password hashing
+- SQLite database for user accounts
+- Docker containerization
 
 ## Requirements
 
-- Python 3.8+
-- OwnTracks Recorder (running on same server)
-- nginx (for OwnTracks authentication)
-- htpasswd utility (apache2-utils or httpd-tools)
+- Docker and Docker Compose
+- OwnTracks Recorder (Docker image)
+- Traefik reverse proxy (Docker image)
 
-## Installation
+## Installation (Docker)
 
 ### 1. Clone the Repository
 
 ```bash
-cd /opt
-sudo git clone https://github.com/romangarms/WhereHaveIBeen-API.git usermanagement
-sudo chown -R $USER:$USER /opt/usermanagement
-cd /opt/usermanagement
+git clone https://github.com/romangarms/WhereHaveIBeen-API.git
+cd WhereHaveIBeen-API
 ```
 
-### 2. Install Dependencies
+### 2. Configure Environment Variables
 
-```bash
-pip3 install -r requirements.txt
-```
-
-Or using a virtual environment (recommended):
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 3. Configure Environment Variables
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Edit `.env` and set the following variables:
+Create a `.env` file in your docker-compose directory:
 
 ```bash
 # Generate secret keys
 JWT_SECRET_KEY=$(python3 -c "import os; print(os.urandom(32).hex())")
-SECRET_KEY=$(python3 -c "import os; print(os.urandom(32).hex())")
 
-# Configure OwnTracks
-OWNTRACKS_URL=http://localhost:8083
-OWNTRACKS_HTPASSWD_PATH=/etc/nginx/owntracks.htpasswd
-
-# Create privileged OwnTracks user (see below)
+# Privileged OwnTracks user (for API proxy access)
 OWNTRACKS_PRIVILEGED_USER=api
 OWNTRACKS_PRIVILEGED_PASS=your-secure-password-here
 ```
 
-### 4. Create Privileged OwnTracks User
+### 3. Docker Compose Configuration
 
-The API needs a privileged OwnTracks account to proxy requests:
+Add to your `docker-compose.yml`:
 
-```bash
-sudo htpasswd -bB /etc/nginx/owntracks.htpasswd api your-secure-password-here
-sudo nginx -s reload
+```yaml
+services:
+  usermanagement-api:
+    build:
+      context: /path/to/WhereHaveIBeen-API
+      dockerfile: Dockerfile
+    environment:
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - OWNTRACKS_URL=http://owntracks-recorder:8083
+      - OWNTRACKS_PRIVILEGED_USER=${OWNTRACKS_PRIVILEGED_USER}
+      - OWNTRACKS_PRIVILEGED_PASS=${OWNTRACKS_PRIVILEGED_PASS}
+      - DATABASE_PATH=/data/users.db
+    volumes:
+      - ./usermanagement-data:/data
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      # API endpoints (no auth middleware - API handles its own auth)
+      - traefik.http.routers.usermanagement-api.rule=Host(`your.domain.com`) && PathPrefix(`/api`)
+      - traefik.http.routers.usermanagement-api.entrypoints=websecure
+      - traefik.http.routers.usermanagement-api.tls=true
+      - traefik.http.routers.usermanagement-api.priority=20
+      - traefik.http.services.usermanagement-api.loadbalancer.server.port=5002
+
+  owntracks-recorder:
+    image: owntracks/recorder
+    labels:
+      - traefik.enable=true
+      # OwnTracks endpoints (protected by ForwardAuth)
+      - traefik.http.routers.owntracks.rule=Host(`your.domain.com`) && (PathPrefix(`/pub`) || PathPrefix(`/api/0`))
+      - traefik.http.routers.owntracks.middlewares=owntracks-forwardauth
+      - traefik.http.routers.owntracks.priority=10
+      # ForwardAuth middleware
+      - traefik.http.middlewares.owntracks-forwardauth.forwardauth.address=http://usermanagement-api:5002/auth/verify
+      - traefik.http.middlewares.owntracks-forwardauth.forwardauth.authResponseHeaders=X-Forwarded-User
 ```
 
-Use the same password in your `.env` file for `OWNTRACKS_PRIVILEGED_PASS`.
+### 4. Migrate Existing Users (Optional)
 
-### 5. Create Database Directory
+If you have existing users in an htpasswd file:
 
 ```bash
-sudo mkdir -p /opt/usermanagement/database
-sudo chown -R www-data:www-data /opt/usermanagement/database
+python3 migrate_htpasswd_users.py /path/to/htpasswd ./usermanagement-data/users.db
 ```
 
-### 6. Initialize Database
+### 5. Deploy
 
 ```bash
-python3 -c "from app import init_db; init_db()"
+docker compose up -d --build
 ```
 
-### 7. Deploy as systemd Service
+### 6. Verify
 
 ```bash
-sudo cp systemd/usermanagement.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable usermanagement
-sudo systemctl start usermanagement
-```
-
-### 8. Verify Service is Running
-
-```bash
-sudo systemctl status usermanagement
-
-# Check logs
-sudo journalctl -u usermanagement -f
-
 # Test health endpoint
-curl http://localhost:5002/health
-```
+curl https://your.domain.com/api/health
 
-Expected response:
-```json
-{"status": "healthy", "service": "WhereHaveIBeen UserManagementAPI"}
+# Test ForwardAuth
+curl -u username:password https://your.domain.com/api/0/last -v
 ```
 
 ## API Endpoints
@@ -142,6 +148,15 @@ Expected response:
 ```bash
 GET /health
 ```
+
+### ForwardAuth (Internal)
+
+```bash
+GET /auth/verify
+Authorization: Basic <base64(username:password)>
+```
+
+Returns 200 with `X-Forwarded-User` header on success, 401 on failure.
 
 ### Register New User
 
@@ -208,16 +223,15 @@ Returns only the authenticated user's devices.
 
 ## Configuration
 
-All configuration is via environment variables (`.env` file):
+All configuration is via environment variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `JWT_SECRET_KEY` | Secret key for JWT signing (CRITICAL - must match frontend) | `abc123...` |
 | `SECRET_KEY` | Flask secret key | `xyz789...` |
 | `PORT` | Server port | `5002` |
-| `DATABASE_PATH` | SQLite database path | `/opt/usermanagement/database/users.db` |
-| `OWNTRACKS_URL` | OwnTracks Recorder URL | `http://localhost:8083` |
-| `OWNTRACKS_HTPASSWD_PATH` | Path to htpasswd file | `/etc/nginx/owntracks.htpasswd` |
+| `DATABASE_PATH` | SQLite database path | `/data/users.db` |
+| `OWNTRACKS_URL` | OwnTracks Recorder URL (internal Docker network) | `http://owntracks-recorder:8083` |
 | `OWNTRACKS_PRIVILEGED_USER` | Privileged OwnTracks username | `api` |
 | `OWNTRACKS_PRIVILEGED_PASS` | Privileged OwnTracks password | `secure-password` |
 
@@ -248,16 +262,9 @@ The API enforces privacy at multiple layers:
 2. **User Parameter Forcing** - The `user` parameter is ALWAYS set to the authenticated user from the JWT
 3. **Response Filtering** - Filters out any data not belonging to the authenticated user
 
-Example of privacy enforcement:
+### ForwardAuth
 
-```python
-# User Alice tries to access Bob's data
-GET /api/locations?user=bob&device=phone
-Authorization: Bearer <alice-jwt-token>
-
-# API automatically changes this to:
-GET /api/0/locations?user=alice&device=phone  # Force alice's data only
-```
+The `/auth/verify` endpoint validates HTTP Basic Auth credentials against the SQLite database, enabling Traefik to protect OwnTracks endpoints without htpasswd files.
 
 ## Integration with WhereHaveIBeen Frontend
 
@@ -265,48 +272,39 @@ The frontend needs these environment variables:
 
 ```bash
 # On Fly.io
-fly secrets set WHIB_USER_API_URL=http://mini.romangarms.com:5002
+fly secrets set WHIB_USER_API_URL=https://mini.romangarms.com
 fly secrets set WHIB_JWT_SECRET_KEY=<same-as-api-jwt-secret>
 ```
 
-## Firewall Configuration
+## Files
 
-Allow access only from the WhereHaveIBeen frontend server:
-
-```bash
-# Ubuntu/Debian with ufw
-sudo ufw allow from <whib-server-ip> to any port 5002
-
-# Or open to all (less secure)
-sudo ufw allow 5002
-```
+| File | Description |
+|------|-------------|
+| `app.py` | Main Flask application with all endpoints |
+| `auth.py` | JWT and password utilities |
+| `config.py` | Configuration from environment variables |
+| `models.py` | SQLAlchemy database models |
+| `Dockerfile` | Container build configuration |
+| `migrate_htpasswd_users.py` | Migration script for existing htpasswd users |
+| `owntracks_manager.py` | **DEPRECATED** - htpasswd management (no longer used) |
 
 ## Troubleshooting
 
-### Service won't start
+### ForwardAuth returns 401
 
 ```bash
-# Check logs
-sudo journalctl -u usermanagement -n 50
+# Check the API logs
+docker logs usermanagement-api
 
-# Common issues:
-# 1. Missing environment variables - check .env file
-# 2. Database permission issues - check /opt/usermanagement/database ownership
-# 3. htpasswd path incorrect - verify OWNTRACKS_HTPASSWD_PATH
-```
-
-### Users can't register
-
-```bash
-# Check htpasswd command is available
-which htpasswd
-
-# Install if missing (Ubuntu/Debian)
-sudo apt install apache2-utils
-
-# Check nginx can reload
-sudo nginx -t
-sudo nginx -s reload
+# Verify user exists in database
+docker exec usermanagement-api python3 -c "
+from app import app, db
+from models import User
+with app.app_context():
+    users = User.query.all()
+    for u in users:
+        print(f'{u.username}: active={u.is_active}')
+"
 ```
 
 ### JWT token errors
@@ -316,48 +314,19 @@ sudo nginx -s reload
 # Generate a new one:
 python3 -c "import os; print(os.urandom(32).hex())"
 
-# Update both .env files and restart services
+# Update environment and restart containers
+docker compose down && docker compose up -d
 ```
 
-### Privacy not enforced
+### Database issues
 
 ```bash
-# Verify the API is being used (not direct OwnTracks access)
-# Check WhereHaveIBeen frontend is calling USER_API_URL, not OwnTracks directly
+# Check database permissions
+ls -la ./usermanagement-data/
 
-# Test with curl
-curl -H "Authorization: Bearer <jwt-token>" \
-  "http://localhost:5002/api/locations?device=phone"
-```
-
-## Development
-
-### Running in Development Mode
-
-```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Run with Flask development server (DO NOT use in production)
-export FLASK_APP=app.py
-export FLASK_ENV=development
-flask run --port 5002
-```
-
-### Running Tests
-
-```bash
-# TODO: Add test suite
-# python -m pytest tests/
-```
-
-## Updating
-
-```bash
-cd /opt/usermanagement
-git pull
-pip3 install -r requirements.txt
-sudo systemctl restart usermanagement
+# Initialize fresh database
+rm ./usermanagement-data/users.db
+docker compose restart usermanagement-api
 ```
 
 ## Backup
@@ -365,24 +334,9 @@ sudo systemctl restart usermanagement
 Backup the SQLite database regularly:
 
 ```bash
-# Create backup
-sudo cp /opt/usermanagement/database/users.db /opt/usermanagement/database/users.db.backup
-
-# Or with timestamp
-sudo cp /opt/usermanagement/database/users.db /opt/usermanagement/database/users.db.$(date +%Y%m%d)
+cp ./usermanagement-data/users.db ./usermanagement-data/users.db.backup
 ```
 
 ## License
 
-MIT License - See main WhereHaveIBeen project for details
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## Support
-
-For issues or questions, please open an issue on GitHub.
+MIT License - See main WhereHaveIBeen project for details.

@@ -25,7 +25,7 @@ from auth import (
     decode_jwt,
     validate_password
 )
-from owntracks_manager import add_user_to_owntracks, update_user_password
+# Note: owntracks_manager is deprecated - ForwardAuth validates directly against SQLite
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -67,6 +67,59 @@ def rate_limit_check(ip, endpoint, max_attempts=5, window_minutes=15):
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "WhereHaveIBeen UserManagementAPI"})
+
+
+@app.route('/auth/verify', methods=['GET'])
+def auth_verify():
+    """
+    ForwardAuth endpoint for Traefik.
+
+    This endpoint is called by Traefik's ForwardAuth middleware to validate
+    HTTP Basic Auth credentials against the SQLite database.
+
+    Headers:
+        Authorization: Basic <base64(username:password)>
+
+    Returns:
+        - 200: Authentication successful (sets X-Forwarded-User header)
+        - 401: Invalid or missing credentials
+    """
+    import base64
+
+    auth_header = request.headers.get('Authorization', '')
+
+    if not auth_header.startswith('Basic '):
+        return '', 401
+
+    try:
+        # Decode Base64 credentials
+        encoded_credentials = auth_header[6:]  # Remove 'Basic ' prefix
+        decoded = base64.b64decode(encoded_credentials).decode('utf-8')
+        username, password = decoded.split(':', 1)
+    except (ValueError, UnicodeDecodeError):
+        return '', 401
+
+    if not username or not password:
+        return '', 401
+
+    # Find user in database
+    user = User.query.filter_by(username=username).first()
+
+    if not user or not verify_password(password, user.password_hash):
+        app.logger.warning(f"ForwardAuth: Failed auth for username: {username}")
+        return '', 401
+
+    # Check if user is active
+    if not user.is_active:
+        app.logger.warning(f"ForwardAuth: Inactive user attempted auth: {username}")
+        return '', 401
+
+    app.logger.debug(f"ForwardAuth: Successful auth for user: {username}")
+
+    # Return 200 with X-Forwarded-User header for downstream services
+    response = app.make_response('')
+    response.headers['X-Forwarded-User'] = username
+    return response, 200
 
 
 @app.route('/api/register', methods=['POST'])
@@ -135,16 +188,10 @@ def register():
         db.session.add(new_user)
         db.session.commit()
 
-        # Add user to OwnTracks htpasswd file
-        try:
-            add_user_to_owntracks(username, password)
-            app.logger.info(f"User registered successfully: {username}")
-        except Exception as e:
-            app.logger.error(f"Failed to add user to OwnTracks: {e}")
-            # Rollback database if OwnTracks update fails
-            db.session.delete(new_user)
-            db.session.commit()
-            return jsonify({"error": "Failed to configure OwnTracks access"}), 500
+        app.logger.info(f"User registered successfully: {username}")
+
+        # User is immediately available for OwnTracks authentication
+        # via ForwardAuth - no htpasswd file update needed
 
         return jsonify({
             "message": "User created successfully",
@@ -350,7 +397,6 @@ if __name__ == '__main__':
         'OWNTRACKS_URL',
         'OWNTRACKS_PRIVILEGED_USER',
         'OWNTRACKS_PRIVILEGED_PASS',
-        'OWNTRACKS_HTPASSWD_PATH'
     ]
 
     missing_vars = [var for var in required_vars if not os.getenv(var)]

@@ -20,7 +20,7 @@ class Config:
     PORT = int(os.getenv('PORT', 5002))
 
     # Database settings
-    SQLALCHEMY_DATABASE_PATH = os.getenv('DATABASE_PATH', '/opt/usermanagement/database/users.db')
+    SQLALCHEMY_DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/users.db')
     SQLALCHEMY_DATABASE_URI = f'sqlite:///{SQLALCHEMY_DATABASE_PATH}'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
@@ -30,7 +30,7 @@ class Config:
 
     # OwnTracks Recorder settings
     OWNTRACKS_URL = os.getenv('OWNTRACKS_URL', 'http://localhost:8083')
-    OWNTRACKS_HTPASSWD_PATH = os.getenv('OWNTRACKS_HTPASSWD_PATH', '/etc/nginx/owntracks.htpasswd')
+    # Note: OWNTRACKS_HTPASSWD_PATH is deprecated - ForwardAuth validates against SQLite
 
     # Privileged OwnTracks credentials (for proxy access)
     # This account should have access to all users' data

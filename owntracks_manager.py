@@ -1,9 +1,19 @@
 """
 OwnTracks Recorder htpasswd file management
 
-This module handles adding/updating users in the OwnTracks htpasswd file.
-When using Traefik with usersfile, it automatically detects changes to the
-htpasswd file, so no reload is needed.
+DEPRECATED: This module is no longer used.
+
+With the switch to Traefik ForwardAuth middleware, authentication is now
+handled directly against the SQLite database via the /auth/verify endpoint.
+This eliminates the need for htpasswd file management.
+
+This file is kept for reference but can be safely deleted.
+
+Previous functionality:
+- Adding/updating users in the OwnTracks htpasswd file
+- Traefik usersfile did NOT support live reloading (contrary to prior belief)
+
+See app.py:/auth/verify for the new authentication flow.
 """
 
 import subprocess
