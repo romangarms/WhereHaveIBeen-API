@@ -1,7 +1,5 @@
 # Server Deployment Guide: OwnTracks + UserManagementAPI with ForwardAuth
 
-This guide walks through deploying OwnTracks with the UserManagementAPI using Traefik ForwardAuth for dynamic user authentication.
-
 ## Prerequisites
 
 - Docker and Docker Compose installed
@@ -11,16 +9,16 @@ This guide walks through deploying OwnTracks with the UserManagementAPI using Tr
 ## Architecture Overview
 
 ```
-                      mini.romangarms.com (HTTPS)
-                                |
-                             Traefik
-                            /        \
-                /api/*              /pub, /api/0/*
-                (no auth)           (ForwardAuth)
-                    |                    |
-          UserManagementAPI      OwnTracks Recorder
-           (registration,         (location data,
-            login, proxy)          mobile app)
+                  mini.romangarms.com (HTTPS)
+                            |
+                         Traefik
+                        /        \
+            /api/*              /pub, /api/0/*
+            (no auth)           (ForwardAuth)
+                |                    |
+      UserManagementAPI      OwnTracks Recorder
+       (registration)         (location data,
+                               mobile app)
 ```
 
 **How it works:**
@@ -28,11 +26,6 @@ This guide walks through deploying OwnTracks with the UserManagementAPI using Tr
 2. Traefik calls `/auth/verify` on UserManagementAPI with the user's Basic Auth credentials
 3. UserManagementAPI validates against SQLite database
 4. If valid (200), Traefik forwards to OwnTracks; if invalid (401), access denied
-
-**Benefits over htpasswd:**
-- New users can authenticate immediately after registration (no restart needed)
-- Single source of truth (SQLite database)
-- No file synchronization issues
 
 ## Phase 1: Prepare Directory Structure
 
@@ -52,52 +45,17 @@ mkdir -p letsencrypt
 ### Step 2: Clone UserManagementAPI
 
 ```bash
-# Clone the API repository
 git clone https://github.com/romangarms/WhereHaveIBeen-API.git
-
-# Verify Dockerfile exists
 ls WhereHaveIBeen-API/Dockerfile
 ```
 
-## Phase 2: Configure Environment
+## Phase 2: Configure docker-compose.yml
 
-### Step 3: Create Environment File
-
-```bash
-cd ~/owntracks
-nano .env
-```
-
-**Contents:**
-
-```bash
-# JWT Secret Key (CRITICAL: Must match frontend!)
-# Generate with: python3 -c "import os; print(os.urandom(32).hex())"
-JWT_SECRET_KEY=<PASTE_GENERATED_KEY_HERE>
-
-# Privileged OwnTracks credentials (for API proxy access)
-# This user needs to exist in the database for /api/locations and /api/last proxying
-OWNTRACKS_PRIVILEGED_USER=api
-OWNTRACKS_PRIVILEGED_PASS=<GENERATE_SECURE_PASSWORD>
-```
-
-**Generate the keys:**
-
-```bash
-# Generate JWT secret (SAVE THIS - needed for frontend too!)
-echo "JWT_SECRET_KEY: $(python3 -c 'import os; print(os.urandom(32).hex())')"
-
-# Generate privileged password
-echo "OWNTRACKS_PRIVILEGED_PASS: $(python3 -c 'import os; print(os.urandom(16).hex())')"
-```
-
-### Step 4: Create docker-compose.yml
+### Step 3: Create docker-compose.yml
 
 ```bash
 nano ~/owntracks/docker-compose.yml
 ```
-
-**Contents:**
 
 ```yaml
 version: "3.6"
@@ -135,10 +93,6 @@ services:
       context: ./WhereHaveIBeen-API
       dockerfile: Dockerfile
     environment:
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - OWNTRACKS_URL=http://owntracks-recorder:8083
-      - OWNTRACKS_PRIVILEGED_USER=${OWNTRACKS_PRIVILEGED_USER}
-      - OWNTRACKS_PRIVILEGED_PASS=${OWNTRACKS_PRIVILEGED_PASS}
       - DATABASE_PATH=/data/users.db
     volumes:
       - ./usermanagement-data:/data
@@ -165,9 +119,6 @@ services:
       - --certificatesresolvers.cloudflare.acme.tlschallenge=true
       - --certificatesresolvers.cloudflare.acme.email=your-email@example.com
       - --certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json
-      # Uncomment for debugging:
-      # - --log.level=DEBUG
-
     ports:
       - "80:80"
       - "443:443"
@@ -179,111 +130,45 @@ services:
       - CF_API_TOKEN=your-cloudflare-api-token
 ```
 
-**Important:** Replace:
-- `mini.romangarms.com` with your domain
-- `your-email@example.com` with your email
-- `your-cloudflare-api-token` with your Cloudflare API token (if using Cloudflare)
+**Important:** Replace `mini.romangarms.com`, email, and Cloudflare token with your values.
 
-## Phase 3: Migrate Existing Users (Optional)
+## Phase 3: Deploy
 
-If you have existing users in an htpasswd file:
-
-### Step 5: Run Migration Script
-
-```bash
-cd ~/owntracks/WhereHaveIBeen-API
-
-# Create virtual environment for migration
-python3 -m venv venv
-source venv/bin/activate
-pip install flask flask-sqlalchemy python-dotenv
-
-# Run migration
-python migrate_htpasswd_users.py /path/to/old/htpasswd ../usermanagement-data/users.db
-
-# Deactivate venv
-deactivate
-```
-
-## Phase 4: Deploy
-
-### Step 6: Start Services
+### Step 4: Start Services
 
 ```bash
 cd ~/owntracks
-
-# Build and start all services
 docker compose up -d --build
-
-# Check logs
 docker compose logs -f
-# Press Ctrl+C to exit
 ```
 
-### Step 7: Create Privileged API User
+## Phase 4: Testing
 
-The privileged user is needed for the `/api/locations` and `/api/last` proxy endpoints:
-
-```bash
-# Register the privileged API user
-curl -X POST https://mini.romangarms.com/api/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "api",
-    "password": "YOUR_OWNTRACKS_PRIVILEGED_PASS_FROM_ENV",
-    "device": "server"
-  }'
-```
-
-**Note:** Use the same password you set in `.env` for `OWNTRACKS_PRIVILEGED_PASS`.
-
-## Phase 5: Testing
-
-### Step 8: Test Health Endpoint
+### Step 5: Test Health
 
 ```bash
 curl https://mini.romangarms.com/api/health
-
 # Expected: {"status": "healthy", "service": "WhereHaveIBeen UserManagementAPI"}
 ```
 
-### Step 9: Test User Registration
+### Step 6: Test Registration
 
 ```bash
 curl -X POST https://mini.romangarms.com/api/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "username": "testuser",
-    "password": "SecurePass123!",
-    "device": "phone"
-  }'
-
+  -d '{"username":"testuser","password":"SecurePass123!","device":"phone"}'
 # Expected: {"message": "User created successfully", "username": "testuser"}
 ```
 
-### Step 10: Test ForwardAuth (OwnTracks Access)
+### Step 7: Test ForwardAuth (OwnTracks Access)
 
 ```bash
-# This should work immediately after registration (no restart needed!)
+# Should work immediately after registration
 curl -u testuser:SecurePass123! https://mini.romangarms.com/api/0/last -v
-
 # Expected: HTTP 200 with JSON response
 ```
 
-### Step 11: Test Login
-
-```bash
-curl -X POST https://mini.romangarms.com/api/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "testuser",
-    "password": "SecurePass123!"
-  }'
-
-# Expected: {"jwt_token": "eyJ...", "username": "testuser", "device": "phone"}
-```
-
-### Step 12: Test OwnTracks Mobile App
+### Step 8: Test OwnTracks Mobile App
 
 1. Open OwnTracks mobile app
 2. Configure connection:
@@ -293,39 +178,21 @@ curl -X POST https://mini.romangarms.com/api/login \
    - Password: `SecurePass123!`
 3. Send a location and verify it appears
 
-## Phase 6: Frontend Integration
-
-### Step 13: Configure WhereHaveIBeen Frontend
-
-On your Fly.io deployment:
-
-```bash
-# Set the API URL (no port needed - same domain!)
-fly secrets set WHIB_USER_API_URL=https://mini.romangarms.com
-
-# Set the JWT secret (must match!)
-fly secrets set WHIB_JWT_SECRET_KEY=<same-jwt-secret-from-server-env>
-```
-
 ## Verification Checklist
 
 - [ ] Docker containers running (`docker compose ps`)
 - [ ] Health endpoint returns success
 - [ ] User registration works
 - [ ] New user can immediately authenticate to OwnTracks (ForwardAuth working)
-- [ ] Login returns JWT token
 - [ ] OwnTracks mobile app can connect
-- [ ] WhereHaveIBeen frontend can register/login users
 
 ## Troubleshooting
 
 ### ForwardAuth returns 401
 
 ```bash
-# Check UserManagementAPI logs
 docker logs usermanagement-api
 
-# Verify user exists
 docker exec usermanagement-api python3 -c "
 from app import app, db
 from models import User
@@ -339,10 +206,7 @@ with app.app_context():
 ### Container won't start
 
 ```bash
-# Check all logs
 docker compose logs
-
-# Check specific service
 docker compose logs usermanagement-api
 docker compose logs reverse-proxy
 ```
@@ -350,45 +214,11 @@ docker compose logs reverse-proxy
 ### Database issues
 
 ```bash
-# Check database file exists
 ls -la ~/owntracks/usermanagement-data/
-
-# Check permissions
 docker exec usermanagement-api ls -la /data/
 ```
 
-### SSL certificate issues
-
-```bash
-# Check Traefik logs
-docker compose logs reverse-proxy
-
-# Verify ACME storage
-ls -la ~/owntracks/letsencrypt/
-```
-
-## Rollback Plan
-
-If something goes wrong, restore from backup:
-
-```bash
-cd ~/owntracks
-
-# Stop services
-docker compose down
-
-# Restore backup (if you have one)
-BACKUP_DIR=~/owntracks/backups/<timestamp>
-cp "$BACKUP_DIR/docker-compose.yml" .
-cp -r "$BACKUP_DIR/"* .
-
-# Restart
-docker compose up -d
-```
-
 ## Updating
-
-To update the UserManagementAPI:
 
 ```bash
 cd ~/owntracks/WhereHaveIBeen-API
@@ -400,19 +230,9 @@ docker compose up -d --build usermanagement-api
 
 ## Backup
 
-Backup the SQLite database regularly:
-
 ```bash
-# Manual backup
 cp ~/owntracks/usermanagement-data/users.db ~/owntracks/usermanagement-data/users.db.backup
 
 # Automated backup (add to crontab)
 0 2 * * * cp ~/owntracks/usermanagement-data/users.db ~/owntracks/usermanagement-data/users.db.$(date +\%Y\%m\%d)
 ```
-
-## Support
-
-If you encounter issues:
-1. Check the logs: `docker compose logs -f`
-2. Review this deployment guide
-3. Check the main README: https://github.com/romangarms/WhereHaveIBeen-API

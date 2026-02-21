@@ -1,13 +1,9 @@
 """
-Authentication utilities for JWT token management and password hashing
+Authentication utilities for password hashing and validation
 """
 
-import jwt
 import bcrypt
 import re
-from datetime import datetime, timedelta
-import uuid
-import os
 
 
 def hash_password(password):
@@ -77,55 +73,3 @@ def validate_password(password):
         return False, "Password must contain at least one number"
 
     return True, "Valid"
-
-
-def generate_jwt(username, device, expiry_days=30):
-    """
-    Generate a JWT token for a user.
-
-    Args:
-        username (str): Username
-        device (str): Default device name
-        expiry_days (int): Number of days until token expires (default: 30)
-
-    Returns:
-        str: JWT token
-    """
-    secret_key = os.getenv('JWT_SECRET_KEY')
-
-    if not secret_key:
-        raise ValueError("JWT_SECRET_KEY environment variable not set")
-
-    payload = {
-        'username': username,
-        'device': device,
-        'exp': datetime.utcnow() + timedelta(days=expiry_days),
-        'iat': datetime.utcnow(),
-        'jti': str(uuid.uuid4())  # Unique token ID (for potential revocation)
-    }
-
-    token = jwt.encode(payload, secret_key, algorithm='HS256')
-    return token
-
-
-def decode_jwt(token):
-    """
-    Decode and validate a JWT token.
-
-    Args:
-        token (str): JWT token to decode
-
-    Returns:
-        dict: Decoded payload
-
-    Raises:
-        jwt.ExpiredSignatureError: Token has expired
-        jwt.InvalidTokenError: Token is invalid
-    """
-    secret_key = os.getenv('JWT_SECRET_KEY')
-
-    if not secret_key:
-        raise ValueError("JWT_SECRET_KEY environment variable not set")
-
-    payload = jwt.decode(token, secret_key, algorithms=['HS256'])
-    return payload
