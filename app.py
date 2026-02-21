@@ -189,6 +189,33 @@ def register():
         return jsonify({"error": "Registration failed"}), 500
 
 
+@app.route('/api/delete-account', methods=['POST'])
+def delete_account():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+
+    user = User.query.filter_by(username=username).first()
+    if not user or not verify_password(password, user.password_hash):
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    try:
+        db.session.delete(user)
+        db.session.commit()
+        app.logger.info(f"User deleted their account: {username}")
+        return jsonify({"message": "Account deleted successfully"}), 200
+    except Exception as e:
+        app.logger.error(f"Delete account error: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Failed to delete account"}), 500
+
+
 def init_db():
     """Initialize database tables"""
     with app.app_context():
