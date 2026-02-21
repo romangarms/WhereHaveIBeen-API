@@ -51,7 +51,7 @@ def rate_limit_check(ip, endpoint, max_attempts=5, window_minutes=15):
         return True, ""
 
 
-@app.route('/health', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "WhereHaveIBeen UserManagementAPI"})
