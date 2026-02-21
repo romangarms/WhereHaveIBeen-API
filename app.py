@@ -129,7 +129,7 @@ def register():
     - 500: Server error
     """
     # Rate limiting
-    allowed, msg = rate_limit_check(request.remote_addr, 'register', max_attempts=3, window_minutes=60)
+    allowed, msg = rate_limit_check(request.remote_addr, 'register', max_attempts=10, window_minutes=60)
     if not allowed:
         return jsonify({"error": msg}), 429
 
