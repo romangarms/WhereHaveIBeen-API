@@ -26,7 +26,7 @@ This API provides:
 ```
 
 **Routing:**
-- `/api/register`, `/health` → UserManagementAPI
+- `/api/register`, `/api/health`, `/api/delete-account` → UserManagementAPI
 - `/auth/verify` → UserManagementAPI (ForwardAuth endpoint, internal only)
 - `/pub`, `/api/0/*` → OwnTracks Recorder (protected by ForwardAuth)
 
@@ -105,7 +105,7 @@ curl -u testuser:SecurePass123! https://your.domain.com/api/0/last
 ### Health Check
 
 ```
-GET /health
+GET /api/health
 ```
 
 ### ForwardAuth (Internal)
@@ -139,7 +139,24 @@ Content-Type: application/json
 **Response:**
 - `201`: User created successfully
 - `400`: Validation error
-- `429`: Rate limit exceeded (3 attempts per hour)
+- `429`: Rate limit exceeded (10 attempts per hour)
+
+### Delete Account
+
+```
+POST /api/delete-account
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "SecurePass123!"
+}
+```
+
+**Response:**
+- `200`: Account deleted successfully
+- `400`: Missing fields
+- `401`: Invalid credentials
 
 ## Configuration
 
@@ -147,7 +164,6 @@ All configuration is via environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SECRET_KEY` | Flask secret key | auto-generated |
 | `PORT` | Server port | `5002` |
 | `DATABASE_PATH` | SQLite database path | `/data/users.db` |
 | `LOG_LEVEL` | Logging level | `INFO` |
@@ -155,7 +171,7 @@ All configuration is via environment variables:
 ## Security Features
 
 ### Rate Limiting
-- Registration: 3 attempts per hour per IP
+- Registration: 10 attempts per hour per IP
 
 ### Password Security
 - bcrypt hashing with cost factor 12

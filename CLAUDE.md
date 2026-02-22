@@ -92,7 +92,6 @@ All via environment variables (see `.env.example`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SECRET_KEY` | auto-generated | Flask secret key |
 | `PORT` | `5002` | Waitress server port |
 | `DATABASE_PATH` | `/data/users.db` | SQLite file path |
 | `LOG_LEVEL` | `INFO` | Python logging level |
@@ -100,7 +99,7 @@ All via environment variables (see `.env.example`):
 ## Key Design Decisions
 
 - **Waitress** as WSGI server (not gunicorn) — runs in `app.py` directly, no separate process manager
-- **In-memory rate limiting** — registration is limited to 3 attempts/hour/IP; resets on container restart
+- **In-memory rate limiting** — registration is limited to 10 attempts/hour/IP; resets on container restart
 - **bcrypt** with cost factor 12 for password hashing
 - **No auth on `/api/*`** — registration endpoint is open; ForwardAuth only protects OwnTracks routes
 - **Single `users` table** — flat schema with `username`, `password_hash`, `owntracks_device`, `is_active`, timestamps
