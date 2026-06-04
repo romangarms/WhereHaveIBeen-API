@@ -102,6 +102,34 @@ def auth_verify():
         app.logger.warning(f"ForwardAuth: Inactive user attempted auth: {username}")
         return '', 401
 
+    # Per-user data isolation.
+    #
+    # The OwnTracks recorder serves whatever ?user= the request asks for, so
+    # authentication alone lets any account read every other account's data
+    # (e.g. /api/0/last with no params dumps everyone's live location). We are
+    # the only auth gate in front of the recorder, so enforce here: any read
+    # under /api/0/ must carry a ?user= that matches the authenticated user.
+    # /pub (phone uploads) is intentionally not restricted so tracking works.
+    #
+    # Gated behind ENFORCE_USER_ISOLATION because the WhereHaveIBeen frontend
+    # must first be updated to request only the logged-in user's data (its
+    # /usersdevices call hits /api/0/last with no params). Flip the env var to
+    # "true" once that frontend change is deployed.
+    if os.getenv('ENFORCE_USER_ISOLATION', 'false').lower() == 'true':
+        from urllib.parse import urlparse, parse_qs
+
+        forwarded_uri = request.headers.get('X-Forwarded-Uri', '')
+        forwarded_path = urlparse(forwarded_uri).path
+        if forwarded_path.startswith('/api/0/'):
+            requested_users = parse_qs(urlparse(forwarded_uri).query).get('user', [])
+            # Recorder folds usernames to lowercase, so compare case-insensitively.
+            if len(requested_users) != 1 or requested_users[0].lower() != username.lower():
+                app.logger.warning(
+                    f"ForwardAuth: {username} denied cross-account access "
+                    f"(uri={forwarded_uri!r})"
+                )
+                return '', 403
+
     app.logger.debug(f"ForwardAuth: Successful auth for user: {username}")
 
     # Return 200 with X-Forwarded-User header for downstream services
