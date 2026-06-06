@@ -3,3 +3,5 @@ flask-sqlalchemy==3.1.1
 bcrypt==4.1.2
 python-dotenv==1.0.0
 waitress==3.0.0
+shapely==2.0.6
+pyproj==3.6.1

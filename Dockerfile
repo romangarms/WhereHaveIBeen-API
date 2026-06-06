@@ -11,6 +11,7 @@ COPY app.py .
 COPY config.py .
 COPY models.py .
 COPY auth.py .
+COPY aggregate.py .
 
 # Create directory for database
 RUN mkdir -p /opt/usermanagement/database

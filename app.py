@@ -5,6 +5,7 @@ Provides user registration and ForwardAuth for Traefik to validate
 OwnTracks Basic Auth credentials against the SQLite database.
 """
 
+import base64
 import os
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -14,6 +15,7 @@ from datetime import datetime
 from config import Config
 from models import db, User
 from auth import hash_password, verify_password, validate_password
+import aggregate
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -51,10 +53,59 @@ def rate_limit_check(ip, endpoint, max_attempts=5, window_minutes=15):
         return True, ""
 
 
+def _basic_auth_user():
+    """
+    Decode an HTTP Basic Authorization header and return the matching active
+    User, or None. Shared by user-facing endpoints (NOT the ForwardAuth gate,
+    which is kept separate to avoid touching the isolation-critical path).
+    """
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Basic '):
+        return None
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode('utf-8')
+        username, password = decoded.split(':', 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not username or not password:
+        return None
+    user = User.query.filter_by(username=username).first()
+    if not user or not verify_password(password, user.password_hash):
+        return None
+    return user
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "WhereHaveIBeen UserManagementAPI"})
+
+
+@app.route('/api/aggregate-roads', methods=['GET'])
+def aggregate_roads():
+    """
+    Privacy-preserving union of ALL users' visited roads as one dissolved
+    GeoJSON Feature (empty properties -> no per-user structure to filter on).
+
+    Requires any valid active user (Basic auth). This route is NOT behind the
+    Traefik forwardauth middleware (the /api router handles its own auth), so the
+    in-handler check below is the only gate. The expensive computation is cached;
+    a cold cache returns 503 + Retry-After while it warms in the background.
+    """
+    user = _basic_auth_user()
+    if user is None:
+        resp = jsonify({"error": "Authentication required"})
+        resp.headers['WWW-Authenticate'] = 'Basic realm="WhereHaveIBeen"'
+        return resp, 401
+    if not user.is_active:
+        return jsonify({"error": "Account inactive"}), 403
+
+    geojson, ready = aggregate.get_cached_or_compute(force=request.args.get('refresh') == '1')
+    if not ready:
+        resp = jsonify({"error": "Aggregate is being computed, try again shortly."})
+        resp.headers['Retry-After'] = '30'
+        return resp, 503
+    return jsonify(geojson), 200
 
 
 @app.route('/auth/verify', methods=['GET'])
