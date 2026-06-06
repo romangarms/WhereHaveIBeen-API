@@ -104,28 +104,30 @@ def auth_verify():
 
     # Per-user data isolation.
     #
-    # The OwnTracks recorder serves whatever ?user= the request asks for, so
-    # authentication alone lets any account read every other account's data
-    # (e.g. /api/0/last with no params dumps everyone's live location). We are
-    # the only auth gate in front of the recorder, so enforce here: any read
-    # under /api/0/ must carry a ?user= that matches the authenticated user.
-    # /pub (phone uploads) is intentionally not restricted so tracking works.
-    #
-    # Gated behind ENFORCE_USER_ISOLATION because the WhereHaveIBeen frontend
-    # must first be updated to request only the logged-in user's data (its
-    # /usersdevices call hits /api/0/last with no params). Flip the env var to
-    # "true" once that frontend change is deployed.
-    if os.getenv('ENFORCE_USER_ISOLATION', 'false').lower() == 'true':
-        from urllib.parse import urlparse, parse_qs
+    # The OwnTracks recorder trusts the request's view of "who am I" for both
+    # reads and writes, and we are the only auth gate in front of it. The
+    # original URI is forwarded here in X-Forwarded-Uri (the request *body* is
+    # NOT available to ForwardAuth), so all enforcement keys off the path and
+    # query string.
+    from urllib.parse import urlparse, parse_qs
 
-        forwarded_uri = request.headers.get('X-Forwarded-Uri', '')
-        forwarded_path = urlparse(forwarded_uri).path
+    forwarded_uri = request.headers.get('X-Forwarded-Uri', '')
+    forwarded_parts = urlparse(forwarded_uri)
+    forwarded_path = forwarded_parts.path
+
+    # --- READS ---
+    # The recorder serves whatever ?user= the request asks for (e.g.
+    # /api/0/last with no params dumps every user's live location), so any
+    # read under /api/0/ must carry a ?user= that matches the authenticated
+    # user. Gated behind ENFORCE_USER_ISOLATION because the WhereHaveIBeen
+    # frontend had to be updated first to scope its reads.
+    if os.getenv('ENFORCE_USER_ISOLATION', 'false').lower() == 'true':
         if forwarded_path.startswith('/api/0/'):
-            requested_users = parse_qs(urlparse(forwarded_uri).query).get('user', [])
+            requested_users = parse_qs(forwarded_parts.query).get('user', [])
             # Recorder folds usernames to lowercase, so compare case-insensitively.
             if len(requested_users) != 1 or requested_users[0].lower() != username.lower():
                 app.logger.warning(
-                    f"ForwardAuth: {username} denied cross-account access "
+                    f"ForwardAuth: {username} denied cross-account read "
                     f"(uri={forwarded_uri!r})"
                 )
                 return '', 403
@@ -135,6 +137,23 @@ def auth_verify():
     # Return 200 with X-Forwarded-User header for downstream services
     response = app.make_response('')
     response.headers['X-Forwarded-User'] = username
+
+    # --- WRITES ---
+    # The recorder builds its storage path owntracks/<u>/<d> from the request's
+    # X-Limit-U / ?u= (header wins over query param), ignoring the JSON body.
+    # Without this, an authenticated user could POST /pub?u=<someone-else> and
+    # inject points into another account's track. We pin the storage user to the
+    # authenticated account by returning X-Limit-U here; docker-compose lists
+    # X-Limit-U in the forwardauth authResponseHeaders, so Traefik strips any
+    # client-supplied X-Limit-U and replaces it with this value, and the
+    # recorder honours the header ahead of any spoofed ?u=. Device (X-Limit-D /
+    # ?d=) is intentionally left alone since it only selects a device within the
+    # user's own account. Always enforced (not gated): writing to another user
+    # is never legitimate, and pinning it to the authed user is a no-op for
+    # honest clients.
+    if forwarded_path.startswith('/pub'):
+        response.headers['X-Limit-U'] = username.lower()
+
     return response, 200
 
 
