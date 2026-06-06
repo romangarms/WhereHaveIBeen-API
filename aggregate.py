@@ -55,6 +55,7 @@ CACHE_PATH = Config.AGGREGATE_CACHE_PATH
 # A fingerprint of every config value that changes the OUTPUT geometry. If any
 # of these change, a persisted cache from an older config is treated as stale.
 PARAMS_FINGERPRINT = "|".join(str(x) for x in [
+    "stats-v2",  # bump when the output shape changes (e.g. added stats properties)
     FROM_DATE, WINDOW_DAYS, BUFFER_M, SIMPLIFY_M, OUT_SIMPLIFY_M,
     ACC_MAX_M, MIN_DIST_M, FLIGHT_SPEED_KMH, FLIGHT_JUMP_KM,
 ])
@@ -165,6 +166,15 @@ def filter_to_segments(points):
     return segments
 
 
+def _segments_distance_km(segments):
+    """Total ground distance across all segments (flights are already split out)."""
+    total = 0.0
+    for seg in segments:
+        for i in range(1, len(seg)):
+            total += _haversine_m(seg[i - 1][0], seg[i - 1][1], seg[i][0], seg[i][1])
+    return total / 1000.0
+
+
 # ---------------------------------------------------------------------------
 # Buffer + union
 # ---------------------------------------------------------------------------
@@ -229,6 +239,9 @@ def compute_union():
     t0 = time.time()
     now = datetime.now(timezone.utc)
     all_segments = []
+    # Population-level scalars (not per-user, not attributable) for the stats panel.
+    max_vel = 0.0
+    max_alt = 0.0
     users = list_users()
     log.info("aggregate: computing over %d users", len(users))
     for user in users:
@@ -248,10 +261,25 @@ def compute_union():
                     log.warning("aggregate: fetch failed %s/%s %s..%s: %s",
                                 user, device, f_iso, t_iso, e)
                     continue
-                if pts:
-                    all_segments.extend(filter_to_segments(pts))
+                if not pts:
+                    continue
+                for p in pts:
+                    v, a = p.get("vel"), p.get("alt")
+                    if v is not None and v > max_vel:
+                        max_vel = v
+                    if a is not None and a > max_alt:
+                        max_alt = a
+                all_segments.extend(filter_to_segments(pts))
 
     feature = _segments_to_feature(all_segments)
+    # Attach aggregate stats. These are single scalars across the whole
+    # population (max speed/altitude anyone reached, combined distance) — no per
+    # user breakdown, so nothing here can be traced to an individual.
+    feature["properties"] = {
+        "max_vel": round(float(max_vel), 1),
+        "max_alt": round(float(max_alt), 1),
+        "distance_km": round(_segments_distance_km(all_segments), 1),
+    }
     log.info("aggregate: done in %.1fs (%d segments)", time.time() - t0, len(all_segments))
     return feature
 
