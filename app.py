@@ -27,6 +27,23 @@ db.init_app(app)
 rate_limit_store = {}
 
 
+def _client_ip():
+    """
+    Real client IP for rate limiting.
+
+    This service always sits behind Traefik, so request.remote_addr is Traefik's
+    internal IP — using it would lump every client into one rate-limit bucket.
+    Traefik appends the real peer address as the LAST entry of X-Forwarded-For,
+    so we take the rightmost entry (spoof-resistant: a client can prepend fake
+    values, but cannot control the entry Traefik adds). Falls back to
+    remote_addr if the header is absent (e.g. local/direct access).
+    """
+    xff = request.headers.get('X-Forwarded-For', '')
+    if xff:
+        return xff.split(',')[-1].strip()
+    return request.remote_addr
+
+
 def rate_limit_check(ip, endpoint, max_attempts=5, window_minutes=15):
     """
     Simple in-memory rate limiting.
@@ -172,16 +189,19 @@ def auth_verify():
     # read under /api/0/ must carry a ?user= that matches the authenticated
     # user. Gated behind ENFORCE_USER_ISOLATION because the WhereHaveIBeen
     # frontend had to be updated first to scope its reads.
-    if os.getenv('ENFORCE_USER_ISOLATION', 'false').lower() == 'true':
-        if forwarded_path.startswith('/api/0/'):
-            requested_users = parse_qs(forwarded_parts.query).get('user', [])
-            # Recorder folds usernames to lowercase, so compare case-insensitively.
-            if len(requested_users) != 1 or requested_users[0].lower() != username.lower():
-                app.logger.warning(
-                    f"ForwardAuth: {username} denied cross-account read "
-                    f"(uri={forwarded_uri!r})"
-                )
-                return '', 403
+    # Always enforced. (This was once gated behind ENFORCE_USER_ISOLATION while
+    # the frontend was migrated to scope its reads; that migration is complete,
+    # so isolation is now unconditional and can't be accidentally disabled by a
+    # missing env var.)
+    if forwarded_path.startswith('/api/0/'):
+        requested_users = parse_qs(forwarded_parts.query).get('user', [])
+        # Recorder folds usernames to lowercase, so compare case-insensitively.
+        if len(requested_users) != 1 or requested_users[0].lower() != username.lower():
+            app.logger.warning(
+                f"ForwardAuth: {username} denied cross-account read "
+                f"(uri={forwarded_uri!r})"
+            )
+            return '', 403
 
     app.logger.debug(f"ForwardAuth: Successful auth for user: {username}")
 
@@ -227,7 +247,7 @@ def register():
     - 500: Server error
     """
     # Rate limiting
-    allowed, msg = rate_limit_check(request.remote_addr, 'register', max_attempts=10, window_minutes=60)
+    allowed, msg = rate_limit_check(_client_ip(), 'register', max_attempts=10, window_minutes=60)
     if not allowed:
         return jsonify({"error": msg}), 429
 

@@ -15,12 +15,26 @@ pip install -r requirements.txt
 # Run locally (uses waitress production server)
 python app.py
 
-# Build and run with Docker
+# Build and run with Docker (from ~/owntracks, where docker-compose.yml lives)
 docker compose up -d --build usermanagement-api
-
-# Rebuild after code changes on server
-ssh macmini "cd ~/owntracks && git -C WhereHaveIBeen-API pull && docker compose up -d --build usermanagement-api"
 ```
+
+**Deploying changes:** the compose service builds directly from this working
+tree — `~/owntracks/docker-compose.yml` sets
+`build.context: /home/romangarms/Documents/GitHub/WhereHaveIBeen-API`. There is
+**no separate clone in `~/owntracks` and no `git pull` step**; `--build` picks up
+whatever is currently in this directory. So the deploy is:
+
+```bash
+# 1. ALWAYS back up the DB first (see warning below)
+cp ~/owntracks/usermanagement-data/users.db \
+   ~/owntracks/usermanagement-data/users.db.bak-$(date +%Y%m%d-%H%M%S)
+# 2. Rebuild + restart (run on the Mini itself, or prefix with `ssh macmini`)
+cd ~/owntracks && docker compose up -d --build usermanagement-api
+```
+
+Because the build reads the working tree rather than git, committing/pushing is
+for record-keeping — it is not what deploys the code.
 
 The app auto-creates the SQLite database on first run if it doesn't exist at the configured `DATABASE_PATH`.
 
@@ -64,12 +78,15 @@ The production server is a Mac Mini homelab:
 
 - **SSH shortcut:** `ssh macmini` (configured in `~/.ssh/config`)
 - **Host:** `romangos-mini-debian.local`, user `romangarms`
-- **Deploy path:** `~/owntracks/` (contains `docker-compose.yml` and the cloned repo)
+- **Deploy path:** `~/owntracks/` (contains `docker-compose.yml`). The API code
+  is **not** cloned here — compose builds it from
+  `~/Documents/GitHub/WhereHaveIBeen-API` via `build.context`.
 
 **IMPORTANT: Always back up the SQLite database before deploying or making any changes on the server.** The database at `~/owntracks/usermanagement-data/users.db` contains all user accounts and is not replicated anywhere. A bad deployment or interrupted migration can corrupt or destroy it. Run this before every deploy:
 
 ```bash
-ssh macmini "cp ~/owntracks/usermanagement-data/users.db ~/owntracks/usermanagement-data/users.db.bak"
+ssh macmini "cp ~/owntracks/usermanagement-data/users.db \
+  ~/owntracks/usermanagement-data/users.db.bak-\$(date +%Y%m%d-%H%M%S)"
 ```
 
 ```bash
@@ -95,11 +112,12 @@ All via environment variables (see `.env.example`):
 | `PORT` | `5002` | Waitress server port |
 | `DATABASE_PATH` | `/data/users.db` | SQLite file path |
 | `LOG_LEVEL` | `INFO` | Python logging level |
+| `ENFORCE_USER_ISOLATION` | `true` (in compose) | **Now redundant** — per-user read isolation is enforced unconditionally in code (`/auth/verify`). The env var is no longer read; kept in compose only as documentation of intent. |
 
 ## Key Design Decisions
 
 - **Waitress** as WSGI server (not gunicorn) — runs in `app.py` directly, no separate process manager
-- **In-memory rate limiting** — registration is limited to 10 attempts/hour/IP; resets on container restart
+- **In-memory rate limiting** — registration is limited to 10 attempts/hour per client IP; resets on container restart. The client IP is taken from the rightmost `X-Forwarded-For` entry (the address Traefik appends), since `request.remote_addr` behind the proxy is just Traefik's internal IP.
 - **bcrypt** with cost factor 12 for password hashing
 - **No auth on `/api/*`** — registration endpoint is open; ForwardAuth only protects OwnTracks routes
 - **Single `users` table** — flat schema with `username`, `password_hash`, `owntracks_device`, `is_active`, timestamps
