@@ -7,6 +7,7 @@ OwnTracks Basic Auth credentials against the SQLite database.
 
 import base64
 import os
+import re
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
@@ -264,8 +265,8 @@ def register():
     if not username or len(username) < 3 or len(username) > 20:
         return jsonify({"error": "Username must be 3-20 characters"}), 400
 
-    if not username.replace('_', '').replace('-', '').isalnum():
-        return jsonify({"error": "Username can only contain letters, numbers, hyphens, and underscores"}), 400
+    if not re.match(r'^[a-zA-Z0-9-]+$', username):
+        return jsonify({"error": "Username can only contain letters, numbers, and hyphens"}), 400
 
     # Validate password
     is_valid, msg = validate_password(password)
