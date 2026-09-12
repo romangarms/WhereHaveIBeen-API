@@ -11,6 +11,7 @@ a past range.
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import pickle
@@ -36,6 +37,8 @@ INLINE_WINDOW_DAYS = Config.TRACK_INLINE_WINDOW_DAYS
 MIN_REFRESH_SECONDS = Config.TRACK_MIN_REFRESH_SECONDS
 
 FETCH_WINDOW_DAYS = 30
+# Windows are fetched concurrently (I/O bound) and consumed in order.
+FETCH_WORKERS = 4
 # The recorder reads from/to as UTC but at minute granularity; fetch wider and
 # bound by tst exactly.
 FETCH_MARGIN = timedelta(days=1)
@@ -104,6 +107,7 @@ class Entry:
         # newer, and the serialized response for the current content.
         self.checked_at = 0.0
         self.body = None
+        self.progress = None
         self.trackers = {d: track.DeviceTracker(FLIGHT_PARAMS) for d in spec.devices}
         self.driving = None
         self.flights_buffer = None
@@ -272,16 +276,20 @@ def iso(ts):
 
 
 def _apply(entry, inc):
+    """Buffer new polylines into the stored geometry. Areas are recomputed
+    once by the caller when the batch is complete."""
+    changed = False
     if inc.driving_lines:
         polys = track.buffer_polylines(inc.driving_lines, entry.spec.buffer_m,
                                        SIMPLIFY_M, OUT_SIMPLIFY_M)
         entry.driving = track.merge_geometry(entry.driving, polys)
-        entry.driving_area = track.geometry_area_km2(entry.driving)
+        changed = True
     if inc.flight_lines:
         polys = track.buffer_polylines(inc.flight_lines, entry.spec.buffer_m,
                                        SIMPLIFY_M, OUT_SIMPLIFY_M)
         entry.flights_buffer = track.merge_geometry(entry.flights_buffer, polys)
-        entry.flights_area = track.geometry_area_km2(entry.flights_buffer)
+        changed = True
+    return changed
 
 
 def update(entry, now_ts):
@@ -296,9 +304,10 @@ def update(entry, now_ts):
     user = spec.username.lower()
     latest = entry.latest_tst
     earliest = entry.earliest_tst
-    inc = track.Increment()
     fetched = 0
+    changed = False
 
+    plan = []
     for device in spec.devices:
         months = recorder.list_rec_months(user, device)
         if not months:
@@ -310,24 +319,36 @@ def update(entry, now_ts):
         if start >= end:
             continue
         for ws, we in recorder.windows(start - FETCH_MARGIN, end + FETCH_MARGIN, FETCH_WINDOW_DAYS):
-            fixes = track.fixes_from_points(recorder.fetch_points(user, device, ws, we))
-            fixes = [f for f in fixes if f.tst <= upper and (
-                lower is None or f.tst > lower or (lower_inclusive and f.tst == lower))]
-            if not fixes:
-                continue
-            fetched += len(fixes)
-            latest = fixes[-1].tst if latest is None else max(latest, fixes[-1].tst)
-            earliest = fixes[0].tst if earliest is None else min(earliest, fixes[0].tst)
-            if spec.kind == "track":
-                inc.extend(entry.trackers[device].feed(fixes))
-            else:
-                track.add_heat_cells(fixes, entry.cells, FLIGHT_PARAMS.acc_max_m)
+            plan.append((device, ws, we))
 
-    if spec.kind == "track":
-        if not spec.open_ended:
-            for tracker in entry.trackers.values():
-                inc.extend(tracker.flush())
-        _apply(entry, inc)
+    entry.progress = {"stage": "fetching", "done": 0, "total": len(plan) + 1}
+    try:
+        with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+            futures = [pool.submit(recorder.fetch_points, user, d, ws, we) for d, ws, we in plan]
+            for (device, ws, we), future in zip(plan, futures):
+                fixes = track.fixes_from_points(future.result())
+                fixes = [f for f in fixes if f.tst <= upper and (
+                    lower is None or f.tst > lower or (lower_inclusive and f.tst == lower))]
+                if fixes:
+                    fetched += len(fixes)
+                    latest = fixes[-1].tst if latest is None else max(latest, fixes[-1].tst)
+                    earliest = fixes[0].tst if earliest is None else min(earliest, fixes[0].tst)
+                    if spec.kind == "track":
+                        changed |= _apply(entry, entry.trackers[device].feed(fixes))
+                    else:
+                        track.add_heat_cells(fixes, entry.cells, FLIGHT_PARAMS.acc_max_m)
+                entry.progress["done"] += 1
+
+        entry.progress["stage"] = "building"
+        if spec.kind == "track":
+            if not spec.open_ended:
+                for tracker in entry.trackers.values():
+                    changed |= _apply(entry, tracker.flush())
+            if changed or entry.computed_at is None:
+                entry.driving_area = track.geometry_area_km2(entry.driving)
+                entry.flights_area = track.geometry_area_km2(entry.flights_buffer)
+    finally:
+        entry.progress = None
 
     entry.latest_tst = latest
     entry.earliest_tst = earliest
@@ -490,12 +511,14 @@ def _run_background(entry, lock):
 def get_or_compute(spec, refresh=False):
     """
     Returns (status, value): status is "ok" (value is the Entry; see
-    response_bytes/etag), "computing" (a compute holds the key; poll again)
-    or "error" (a background compute failed; value is the message).
+    response_bytes/etag), "computing" (a compute holds the key; value is its
+    progress dict or None; poll again) or "error" (a background compute
+    failed; value is the message).
     """
     lock = _lock_for(spec.key)
     if not lock.acquire(blocking=False):
-        return "computing", None
+        running = _computing.get(spec.key)
+        return "computing", dict(running.progress) if running is not None and running.progress else None
     handed_off = False
     try:
         now = time.time()
@@ -531,7 +554,7 @@ def get_or_compute(spec, refresh=False):
         if err is not None:
             return "error", err
         entry = entry or Entry(spec)
-        _computing[spec.key] = now
+        _computing[spec.key] = entry
         handed_off = True
         threading.Thread(target=_run_background, args=(entry, lock), daemon=True).start()
         return "computing", None

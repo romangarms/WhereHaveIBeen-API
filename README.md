@@ -217,10 +217,12 @@ the two geometries are `Polygon`, `MultiPolygon` or `null`.
 `gx = round(lon / cell_deg)`, `gy = round(lat / cell_deg)`; the cell centre is
 `(gx * cell_deg, gy * cell_deg)`.
 
-**`202`** `{"status": "computing"}` with a `Retry-After` header means the
-result is not cached yet and a background compute is running; poll the same
-URL. Full-history requests always start this way; ranges of about a month or
-less compute inline.
+**`202`** `{"status": "computing", "progress": {"stage": "fetching", "done": 12, "total": 27}}`
+with a `Retry-After` header means the result is not cached yet and a
+background compute is running; poll the same URL. `progress` counts recorder
+fetch windows plus one final "building" step and is omitted before the
+compute has started. Full-history requests always start this way; ranges of
+about a month or less compute inline.
 
 Caching: one entry per (user, devices, buffer, range) under
 `TRACK_CACHE_DIR/<username>/`. Open-ended entries store enough pipeline state

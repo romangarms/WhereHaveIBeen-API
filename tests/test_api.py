@@ -264,3 +264,35 @@ def test_aggregate_etag(client, fake_recorder, monkeypatch):
     assert r.status_code == 200 and r.headers["ETag"] == '"agg-1700000000"'
     r2 = client.get("/api/aggregate-roads", headers={**basic("alice"), "If-None-Match": r.headers["ETag"]})
     assert r2.status_code == 304
+
+
+def test_update_reports_progress_per_window(fake_recorder, monkeypatch):
+    seen = []
+    real_fetch = recorder.fetch_points
+
+    def spy(*a, **k):
+        seen.append(dict(entry.progress))
+        return real_fetch(*a, **k)
+
+    monkeypatch.setattr(recorder, "fetch_points", spy)
+    spec = track_cache.Spec("track", "alice", ["phone"], None, None, 500)
+    entry = track_cache.Entry(spec)
+    track_cache.update(entry, time.time())
+    assert seen and all(p["stage"] == "fetching" for p in seen)
+    assert seen[0]["total"] == len(seen) + 1
+    assert entry.progress is None
+    assert entry.driving_area > 0
+
+
+def test_202_body_carries_progress_when_available(client, fake_recorder):
+    # buffer_m=1234 makes a key no earlier test has warmed.
+    r = client.get("/api/me/track?device=phone&buffer_m=1234", headers=basic("alice"))
+    assert r.status_code == 202
+    body = r.get_json()
+    assert body["status"] == "computing"
+    if "progress" in body:
+        assert set(body["progress"]) == {"stage", "done", "total"}
+    for _ in range(100):
+        if client.get("/api/me/track?device=phone&buffer_m=1234", headers=basic("alice")).status_code == 200:
+            break
+        time.sleep(0.1)

@@ -195,7 +195,10 @@ def _me_endpoint(kind):
         app.logger.error(f"{kind}: recorder error for {user.username}: {e}")
         return jsonify({"error": "Location recorder unavailable"}), 502
     if status == "computing":
-        resp = jsonify({"status": "computing"})
+        body = {"status": "computing"}
+        if value:
+            body["progress"] = value
+        resp = jsonify(body)
         resp.headers['Retry-After'] = str(track_cache.RETRY_AFTER_SECONDS)
         return resp, 202
     if status == "error":
