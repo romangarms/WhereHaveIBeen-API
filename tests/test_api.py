@@ -98,6 +98,7 @@ def test_closed_range_track_inline(client, fake_recorder):
     assert body["range"] == {"from": frm, "to": to}
     assert body["buffer_m"] == 100
     assert body["latest_tst"] == fake_recorder["fixes"][-1].tst
+    assert body["earliest_tst"] == fake_recorder["fixes"][0].tst
     assert body["driving"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
     assert body["flights_buffer"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
     assert len(body["flights"]["features"]) == 1
@@ -164,7 +165,7 @@ def test_no_devices_gives_empty_payload(client, monkeypatch):
     r = client.get("/api/me/track", headers=basic("alice"))
     assert r.status_code == 200
     body = r.get_json()
-    assert body["latest_tst"] is None
+    assert body["latest_tst"] is None and body["earliest_tst"] is None
     assert body["driving"]["geometry"] is None
     assert body["stats"]["driving"]["distance_km"] == 0.0
 

@@ -42,12 +42,12 @@ SIMPLIFY_M = 15.0
 OUT_SIMPLIFY_M = 30.0
 DEFAULT_BUFFER_M = 500
 MIN_BUFFER_M, MAX_BUFFER_M = 100, 5000
-RETRY_AFTER_SECONDS = 10
+RETRY_AFTER_SECONDS = 1
 COORD_DECIMALS = 6
 
 FLIGHT_PARAMS = track.DEFAULT_FLIGHT_PARAMS
 PARAMS_FINGERPRINT = "|".join(str(x) for x in [
-    "track-v1", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
+    "track-v2", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
     FLIGHT_PARAMS.entry_kmh, FLIGHT_PARAMS.entry_alt_m, FLIGHT_PARAMS.entry_jump_km,
     FLIGHT_PARAMS.exit_kmh, FLIGHT_PARAMS.lookback_s, FLIGHT_PARAMS.stale_s,
     FLIGHT_PARAMS.acc_max_m, FLIGHT_PARAMS.min_dist_m,
@@ -98,6 +98,7 @@ class Entry:
         self.created_at = time.time()
         self.computed_at = None
         self.latest_tst = None
+        self.earliest_tst = None
         self.trackers = {d: track.DeviceTracker(FLIGHT_PARAMS) for d in spec.devices}
         self.driving = None
         self.flights_buffer = None
@@ -111,6 +112,7 @@ class Entry:
             "created_at": self.created_at,
             "computed_at": self.computed_at,
             "latest_tst": self.latest_tst,
+            "earliest_tst": self.earliest_tst,
             "trackers": {d: t.to_state() for d, t in self.trackers.items()},
             "driving": shapely.to_wkb(self.driving) if self.driving is not None else None,
             "flights_buffer": (shapely.to_wkb(self.flights_buffer)
@@ -128,6 +130,7 @@ class Entry:
         e.created_at = data["created_at"]
         e.computed_at = data["computed_at"]
         e.latest_tst = data["latest_tst"]
+        e.earliest_tst = data.get("earliest_tst")
         e.trackers = {d: track.DeviceTracker.from_state(s, FLIGHT_PARAMS)
                       for d, s in data["trackers"].items()}
         e.driving = shapely.from_wkb(data["driving"]) if data["driving"] else None
@@ -286,6 +289,7 @@ def update(entry, now_ts):
         lower, lower_inclusive = spec.from_ts, True
     user = spec.username.lower()
     latest = entry.latest_tst
+    earliest = entry.earliest_tst
     inc = track.Increment()
     fetched = 0
 
@@ -307,6 +311,7 @@ def update(entry, now_ts):
                 continue
             fetched += len(fixes)
             latest = fixes[-1].tst if latest is None else max(latest, fixes[-1].tst)
+            earliest = fixes[0].tst if earliest is None else min(earliest, fixes[0].tst)
             if spec.kind == "track":
                 inc.extend(entry.trackers[device].feed(fixes))
             else:
@@ -319,6 +324,7 @@ def update(entry, now_ts):
         _apply(entry, inc)
 
     entry.latest_tst = latest
+    entry.earliest_tst = earliest
     entry.computed_at = now_ts
     log.info("track_cache: %s %s/%s updated with %d points in %.1fs",
              spec.kind, spec.username, spec.key, fetched, time.time() - t0)
@@ -366,7 +372,8 @@ def payload(entry):
     spec = entry.spec
     base = {"range": _range(spec, entry.computed_at),
             "computed_at": int(entry.computed_at),
-            "latest_tst": int(entry.latest_tst) if entry.latest_tst is not None else None}
+            "latest_tst": int(entry.latest_tst) if entry.latest_tst is not None else None,
+            "earliest_tst": int(entry.earliest_tst) if entry.earliest_tst is not None else None}
     if spec.kind == "heatmap":
         base["cell_deg"] = track.HEATMAP_CELL_DEG
         base["cells"] = [[gx, gy, n] for (gx, gy), n in sorted(entry.cells.items())]

@@ -192,6 +192,7 @@ an inactive account returns `403`, bad parameters return `400` with
   "range": { "from": null, "to": "2026-09-10T17:00:00Z" },
   "computed_at": 1789000000,
   "latest_tst": 1788999000,
+  "earliest_tst": 1722470400,
   "buffer_m": 500,
   "driving": { "type": "Feature", "properties": {}, "geometry": { "type": "MultiPolygon", "coordinates": [] } },
   "flights": { "type": "FeatureCollection", "features": [
@@ -206,10 +207,12 @@ an inactive account returns `403`, bad parameters return `400` with
 }
 ```
 
-`range.from` is `null` when `from` was omitted; `latest_tst` is `null` with no
-points; the two geometries are `Polygon`, `MultiPolygon` or `null`.
+`range.from` is `null` when `from` was omitted; `latest_tst` and
+`earliest_tst` (oldest and newest fix in the range) are `null` with no points;
+the two geometries are `Polygon`, `MultiPolygon` or `null`.
 
-**Heatmap response** (`200`): `range`, `computed_at`, `latest_tst` as above plus
+**Heatmap response** (`200`): `range`, `computed_at`, `latest_tst`,
+`earliest_tst` as above plus
 `"cell_deg": 0.0006` and `"cells": [[gx, gy, count], ...]` where
 `gx = round(lon / cell_deg)`, `gy = round(lat / cell_deg)`; the cell centre is
 `(gx * cell_deg, gy * cell_deg)`.
