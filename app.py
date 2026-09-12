@@ -6,6 +6,7 @@ OwnTracks Basic Auth credentials against the SQLite database.
 """
 
 import base64
+import logging
 import os
 import re
 import time
@@ -14,6 +15,8 @@ from datetime import datetime
 
 # Import our modules
 from config import Config
+
+logging.basicConfig(level=Config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 from models import db, User
 from auth import hash_password, verify_password, validate_password
 import aggregate
