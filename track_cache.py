@@ -315,7 +315,8 @@ def update(entry, now_ts):
         start = recorder.month_start(*months[0])
         if lower is not None:
             start = max(start, _dt(lower))
-        end = _dt(upper)
+        # .rec files are per month, so nothing exists past the last one.
+        end = min(_dt(upper), recorder.month_start(*months[-1]) + timedelta(days=32))
         if start >= end:
             continue
         for ws, we in recorder.windows(start - FETCH_MARGIN, end + FETCH_MARGIN, FETCH_WINDOW_DAYS):

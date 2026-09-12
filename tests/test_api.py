@@ -282,6 +282,8 @@ def test_update_reports_progress_per_window(fake_recorder, monkeypatch):
     assert seen[0]["total"] == len(seen) + 1
     assert entry.progress is None
     assert entry.driving_area > 0
+    # journey() spans one month, so a single window (plus margins) covers it.
+    assert len(seen) <= 3
 
 
 def test_202_body_carries_progress_when_available(client, fake_recorder):
