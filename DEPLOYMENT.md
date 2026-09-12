@@ -107,6 +107,10 @@ services:
       - traefik.http.routers.usermanagement-api.tls.certresolver=cloudflare
       - traefik.http.routers.usermanagement-api.priority=20
 
+      # Recommended: gzip the multi-megabyte /api/me/track payloads at the proxy
+      - traefik.http.middlewares.api-compress.compress=true
+      - traefik.http.routers.usermanagement-api.middlewares=api-compress
+
       - traefik.http.services.usermanagement-api.loadbalancer.server.port=5002
 
   reverse-proxy:
@@ -131,6 +135,23 @@ services:
 ```
 
 **Important:** Replace `mini.romangarms.com`, email, and Cloudflare token with your values.
+
+**Response compression.** `/api/me/track` returns GeoJSON that can run to
+several megabytes uncompressed but gzips very well. Compression is done by
+Traefik's `compress` middleware rather than in Flask; the two `api-compress`
+labels above enable it. On an existing deployment add the two labels to the
+`usermanagement-api` service and recreate it:
+
+```bash
+cd ~/owntracks && docker compose up -d usermanagement-api
+```
+
+**Track cache volume.** The per-user track/heatmap cache lives under
+`TRACK_CACHE_DIR` (default `/data/tracks`), i.e. inside the same
+`./usermanagement-data:/data` mount as the SQLite database, so it survives
+container restarts and rebuilds. It is safe to delete: entries are recomputed
+on demand. Budget a few megabytes per user per cached range (each user holds
+at most `TRACK_MAX_ENTRIES_PER_USER`, default 24).
 
 ## Phase 3: Deploy
 
@@ -166,6 +187,18 @@ curl -X POST https://mini.romangarms.com/api/register \
 # Should work immediately after registration
 curl -u testuser:SecurePass123! https://mini.romangarms.com/api/0/last -v
 # Expected: HTTP 200 with JSON response
+```
+
+### Step 7b: Test Per-User Endpoints
+
+```bash
+curl -u testuser:SecurePass123! https://mini.romangarms.com/api/me/devices
+# Expected: {"username": "testuser", "devices": ["phone"]}
+
+curl -si -u testuser:SecurePass123! https://mini.romangarms.com/api/me/track | head -5
+# Expected on a cold cache: HTTP 202 with Retry-After; poll until HTTP 200
+
+curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/heatmap?from=2026-09-01T00:00:00Z" | jq '.cells | length'
 ```
 
 ### Step 8: Test OwnTracks Mobile App

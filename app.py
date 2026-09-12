@@ -8,8 +8,8 @@ OwnTracks Basic Auth credentials against the SQLite database.
 import base64
 import os
 import re
+import time
 from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 
 # Import our modules
@@ -17,6 +17,8 @@ from config import Config
 from models import db, User
 from auth import hash_password, verify_password, validate_password
 import aggregate
+import recorder
+import track_cache
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -93,6 +95,115 @@ def _basic_auth_user():
     return user
 
 
+def _require_user():
+    """(user, None) for a valid active Basic-auth user, else (None, error response)."""
+    user = _basic_auth_user()
+    if user is None:
+        resp = jsonify({"error": "Authentication required"})
+        resp.headers['WWW-Authenticate'] = 'Basic realm="WhereHaveIBeen"'
+        return None, (resp, 401)
+    if not user.is_active:
+        return None, (jsonify({"error": "Account inactive"}), 403)
+    return user, None
+
+
+class _BadRequest(Exception):
+    pass
+
+
+def _user_devices(user):
+    """The recorder's device list for the authenticated user only."""
+    return recorder.list_devices(user.username.lower())
+
+
+def _parse_me_args(user, kind):
+    """Build a cache Spec from the query string. Raises _BadRequest."""
+    args = request.args
+    from_ts = to_ts = None
+    try:
+        if args.get('from'):
+            from_ts = track_cache.parse_iso(args['from'])
+        if args.get('to'):
+            to_ts = track_cache.parse_iso(args['to'])
+    except ValueError as e:
+        raise _BadRequest(f"Invalid from/to: {e}")
+    if from_ts is not None and to_ts is not None and from_ts > to_ts:
+        raise _BadRequest("from must not be after to")
+
+    buffer_m = None
+    if kind == 'track':
+        raw = args.get('buffer_m', str(track_cache.DEFAULT_BUFFER_M))
+        try:
+            buffer_m = int(raw)
+        except ValueError:
+            raise _BadRequest("buffer_m must be an integer")
+        buffer_m = max(track_cache.MIN_BUFFER_M, min(track_cache.MAX_BUFFER_M, buffer_m))
+
+    devices = _user_devices(user)
+    device = args.get('device')
+    if device:
+        if device not in devices:
+            raise _BadRequest("Unknown device")
+        devices = [device]
+    try:
+        return track_cache.Spec(kind, user.username, devices, from_ts, to_ts, buffer_m)
+    except ValueError as e:
+        raise _BadRequest(str(e))
+
+
+def _me_endpoint(kind):
+    user, denied = _require_user()
+    if denied:
+        return denied
+    try:
+        spec = _parse_me_args(user, kind)
+    except _BadRequest as e:
+        return jsonify({"error": str(e)}), 400
+    except recorder.RecorderError as e:
+        app.logger.error(f"{kind}: recorder error for {user.username}: {e}")
+        return jsonify({"error": "Location recorder unavailable"}), 502
+
+    if not spec.devices:
+        return jsonify(track_cache.empty_payload(spec, time.time())), 200
+
+    try:
+        status, body = track_cache.get_or_compute(spec, refresh=request.args.get('refresh') == '1')
+    except recorder.RecorderError as e:
+        app.logger.error(f"{kind}: recorder error for {user.username}: {e}")
+        return jsonify({"error": "Location recorder unavailable"}), 502
+    if status == "computing":
+        resp = jsonify({"status": "computing"})
+        resp.headers['Retry-After'] = str(track_cache.RETRY_AFTER_SECONDS)
+        return resp, 202
+    if status == "error":
+        app.logger.error(f"{kind}: compute failed for {user.username}: {body}")
+        return jsonify({"error": "Computation failed, retry to start again"}), 502
+    return jsonify(body), 200
+
+
+@app.route('/api/me/devices', methods=['GET'])
+def me_devices():
+    user, denied = _require_user()
+    if denied:
+        return denied
+    try:
+        devices = _user_devices(user)
+    except recorder.RecorderError as e:
+        app.logger.error(f"devices: recorder error for {user.username}: {e}")
+        return jsonify({"error": "Location recorder unavailable"}), 502
+    return jsonify({"username": user.username, "devices": devices}), 200
+
+
+@app.route('/api/me/track', methods=['GET'])
+def me_track():
+    return _me_endpoint('track')
+
+
+@app.route('/api/me/heatmap', methods=['GET'])
+def me_heatmap():
+    return _me_endpoint('heatmap')
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""
@@ -110,13 +221,9 @@ def aggregate_roads():
     in-handler check below is the only gate. The expensive computation is cached;
     a cold cache returns 503 + Retry-After while it warms in the background.
     """
-    user = _basic_auth_user()
-    if user is None:
-        resp = jsonify({"error": "Authentication required"})
-        resp.headers['WWW-Authenticate'] = 'Basic realm="WhereHaveIBeen"'
-        return resp, 401
-    if not user.is_active:
-        return jsonify({"error": "Account inactive"}), 403
+    user, denied = _require_user()
+    if denied:
+        return denied
 
     geojson, ready = aggregate.get_cached_or_compute(force=request.args.get('refresh') == '1')
     if not ready:

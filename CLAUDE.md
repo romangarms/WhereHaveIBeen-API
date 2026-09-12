@@ -51,9 +51,33 @@ curl -X POST https://mini.romangarms.com/api/register \
 
 # Test ForwardAuth (via OwnTracks endpoint)
 curl -u testuser:SecurePass123! https://mini.romangarms.com/api/0/last
+
+# Per-user endpoints (Basic auth, validated in-handler; no ?user= is accepted)
+curl -u testuser:SecurePass123! https://mini.romangarms.com/api/me/devices
+# All-time track: first call returns 202 {"status":"computing"} + Retry-After; poll until 200
+curl -si -u testuser:SecurePass123! https://mini.romangarms.com/api/me/track | head -20
+# Closed 30-day range with a 250 m corridor (computed inline)
+curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/track?from=2026-08-01T00:00:00Z&to=2026-09-01T00:00:00Z&buffer_m=250" | jq .stats
+# One device only; an unknown device is a 400
+curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/track?device=phone&from=2026-09-01T00:00:00Z" | jq '.flights.features | length'
+# Heatmap grid, then force a recompute
+curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/heatmap?from=2026-09-01T00:00:00Z" | jq '.cells | length'
+curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/heatmap?from=2026-09-01T00:00:00Z&refresh=1" | jq .computed_at
+# Auth paths: no credentials -> 401 with WWW-Authenticate, inactive account -> 403
+curl -si https://mini.romangarms.com/api/me/devices | head -3
 ```
 
-No test suite exists — testing is done manually against the running server.
+Unit tests run without a recorder:
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
+
+They cover flight detection, segment grouping, buffer/union geometry, the
+heatmap grid, incremental-vs-one-pass equivalence, and the auth/400 paths via
+the Flask test client. Anything that touches the recorder is still checked
+manually with the curl list above.
 
 ## Architecture
 
@@ -113,11 +137,16 @@ All via environment variables (see `.env.example`):
 | `DATABASE_PATH` | `/data/users.db` | SQLite file path |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ENFORCE_USER_ISOLATION` | `true` (in compose) | **Now redundant** — per-user read isolation is enforced unconditionally in code (`/auth/verify`). The env var is no longer read; kept in compose only as documentation of intent. |
+| `TRACK_CACHE_DIR` | `/data/tracks` | Per-user track/heatmap cache (`<dir>/<username>/<key>.pkl` + `index.json`). Lives on the `/data` volume so it survives restarts. |
+| `TRACK_CLOSED_TTL_SECONDS` | `86400` | How long a closed-range (`to` given) entry is served before recompute. |
+| `TRACK_MAX_ENTRIES_PER_USER` | `24` | LRU cap per user; open-ended all-time entries are evicted last. |
+| `TRACK_INLINE_WINDOW_DAYS` | `31` | Fetch windows up to this long compute inline; longer ones run in a background thread behind a `202`. |
 
 ## Key Design Decisions
 
 - **Waitress** as WSGI server (not gunicorn) — runs in `app.py` directly, no separate process manager
 - **In-memory rate limiting** — registration is limited to 10 attempts/hour per client IP; resets on container restart. The client IP is taken from the rightmost `X-Forwarded-For` entry (the address Traefik appends), since `request.remote_addr` behind the proxy is just Traefik's internal IP.
 - **bcrypt** with cost factor 12 for password hashing
-- **No auth on `/api/*`** — registration endpoint is open; ForwardAuth only protects OwnTracks routes
+- **No auth on `/api/*`** — registration endpoint is open; ForwardAuth only protects OwnTracks routes. `/api/aggregate-roads` and `/api/me/*` validate Basic auth in-handler via `_require_user()`.
+- **Per-user endpoints (`/api/me/devices`, `/api/me/track`, `/api/me/heatmap`)** — the recorder is only ever queried for the authenticated username. Geometry comes from `track.py` (episodic flight detection ported from the web app's `detectFlights`, buffer + dissolve in local AEQD projections); `track_cache.py` keeps one pickled entry per (user, devices, buffer, range) and extends open-ended entries incrementally by holding the streaming `DeviceTracker` state. `recorder.py` always passes `from`, because the recorder defaults an omitted `from` to six hours ago, and finds the start of history from the device's `YYYY-MM.rec` listing.
 - **Single `users` table** — flat schema with `username`, `password_hash`, `owntracks_device`, `is_active`, timestamps

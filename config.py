@@ -30,6 +30,7 @@ class Config:
     # Recorder is reachable on the internal docker network without auth.
     RECORDER_URL = os.getenv('RECORDER_URL', 'http://owntracks-recorder:8083')
     RECORDER_TIMEOUT = int(os.getenv('RECORDER_TIMEOUT', 60))
+    RECORDER_AUTH = os.getenv('RECORDER_AUTH', '')
     # Time range + windowing (recorder has no offset pagination; we page by time).
     AGGREGATE_FROM = os.getenv('AGGREGATE_FROM', '2024-08-01')
     AGGREGATE_WINDOW_DAYS = int(os.getenv('AGGREGATE_WINDOW_DAYS', 30))
@@ -45,3 +46,11 @@ class Config:
     # Caching.
     AGGREGATE_TTL_SECONDS = int(os.getenv('AGGREGATE_TTL_SECONDS', 86400))
     AGGREGATE_CACHE_PATH = os.getenv('AGGREGATE_CACHE_PATH', '/data/aggregate_roads.json')
+
+    # --- Per-user track/heatmap endpoints (/api/me/*) ---
+    TRACK_CACHE_DIR = os.getenv('TRACK_CACHE_DIR', '/data/tracks')
+    TRACK_CLOSED_TTL_SECONDS = int(os.getenv('TRACK_CLOSED_TTL_SECONDS', 86400))
+    TRACK_MAX_ENTRIES_PER_USER = int(os.getenv('TRACK_MAX_ENTRIES_PER_USER', 24))
+    # Fetch windows up to this long are computed inline; longer ones run in the
+    # background and the request returns 202.
+    TRACK_INLINE_WINDOW_DAYS = int(os.getenv('TRACK_INLINE_WINDOW_DAYS', 31))

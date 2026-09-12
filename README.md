@@ -9,6 +9,8 @@ This API provides:
 1. **User Registration** - Create OwnTracks user accounts
 2. **ForwardAuth** - Traefik middleware authentication against SQLite database
 3. **Health Check** - Service health endpoint
+4. **Per-user map data** - Finished track geometry, flights, heatmap grid and stats for native clients
+5. **Aggregate roads** - Anonymised union of every user's visited roads
 
 ## Architecture
 
@@ -26,7 +28,7 @@ This API provides:
 ```
 
 **Routing:**
-- `/api/register`, `/api/health`, `/api/delete-account` → UserManagementAPI
+- `/api/register`, `/api/health`, `/api/delete-account`, `/api/me/*`, `/api/aggregate-roads` → UserManagementAPI
 - `/auth/verify` → UserManagementAPI (ForwardAuth endpoint, internal only)
 - `/pub`, `/api/0/*` → OwnTracks Recorder (protected by ForwardAuth)
 
@@ -158,6 +160,83 @@ Content-Type: application/json
 - `400`: Missing fields
 - `401`: Invalid credentials
 
+### Per-user endpoints
+
+All three take HTTP Basic auth on every request and only ever read the
+authenticated user's data (no `user` parameter exists). Missing or invalid
+credentials return `401` with `WWW-Authenticate: Basic realm="WhereHaveIBeen"`,
+an inactive account returns `403`, bad parameters return `400` with
+`{"error": "<message>"}`. Units are metric: km, km², m, km/h. Coordinates are
+`[lon, lat]` WGS84.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/me/devices` | `{"username": "alice", "devices": ["phone", "ipad"]}`. Also a cheap credential check at sign-in. |
+| `GET /api/me/track` | Buffered "explored" corridor, flight lines, flight corridor and stats for a date range. |
+| `GET /api/me/heatmap` | Visit-frequency grid for a date range. |
+
+**Query parameters** (`/api/me/track` and `/api/me/heatmap`):
+
+| Param | Default | Notes |
+|-------|---------|-------|
+| `from` | full history | ISO 8601 with offset or `Z`, inclusive. |
+| `to` | now | ISO 8601. Omitting it keeps the entry open-ended and lets later requests extend it incrementally. |
+| `device` | all devices | Must be one of the user's devices, else `400`. |
+| `buffer_m` | `500` | Track only. Corridor radius in metres, clamped to `100..5000`. |
+| `refresh` | unset | `1` discards the cached entry and recomputes. |
+
+**Track response** (`200`):
+
+```json
+{
+  "range": { "from": null, "to": "2026-09-10T17:00:00Z" },
+  "computed_at": 1789000000,
+  "latest_tst": 1788999000,
+  "buffer_m": 500,
+  "driving": { "type": "Feature", "properties": {}, "geometry": { "type": "MultiPolygon", "coordinates": [] } },
+  "flights": { "type": "FeatureCollection", "features": [
+    { "type": "Feature",
+      "properties": { "start_tst": 1780000000, "end_tst": 1780010000, "distance_km": 1234.5 },
+      "geometry": { "type": "LineString", "coordinates": [[-122.3, 47.4], [-118.4, 33.9]] } } ] },
+  "flights_buffer": { "type": "Feature", "properties": {}, "geometry": null },
+  "stats": {
+    "driving": { "distance_km": 0.0, "area_km2": 0.0, "max_alt_m": 0.0, "max_vel_kmh": 0.0 },
+    "flying":  { "distance_km": 0.0, "area_km2": 0.0, "max_alt_m": 0.0, "max_vel_kmh": 0.0 }
+  }
+}
+```
+
+`range.from` is `null` when `from` was omitted; `latest_tst` is `null` with no
+points; the two geometries are `Polygon`, `MultiPolygon` or `null`.
+
+**Heatmap response** (`200`): `range`, `computed_at`, `latest_tst` as above plus
+`"cell_deg": 0.0006` and `"cells": [[gx, gy, count], ...]` where
+`gx = round(lon / cell_deg)`, `gy = round(lat / cell_deg)`; the cell centre is
+`(gx * cell_deg, gy * cell_deg)`.
+
+**`202`** `{"status": "computing"}` with a `Retry-After` header means the
+result is not cached yet and a background compute is running; poll the same
+URL. Full-history requests always start this way; ranges of about a month or
+less compute inline.
+
+Caching: one entry per (user, devices, buffer, range) under
+`TRACK_CACHE_DIR/<username>/`. Open-ended entries store enough pipeline state
+to be extended with only the points newer than `latest_tst`; closed entries
+are recomputed after `TRACK_CLOSED_TTL_SECONDS`. Each user keeps at most
+`TRACK_MAX_ENTRIES_PER_USER` entries (LRU, open-ended all-time entries evicted
+last).
+
+### Aggregate Roads
+
+```
+GET /api/aggregate-roads
+Authorization: Basic <base64(username:password)>
+```
+
+One dissolved GeoJSON Feature covering every user's roads, with population-level
+`properties`: `max_vel`, `max_alt`, `distance_km`, `area_km2`. Returns `503`
+with `Retry-After` while the cache warms.
+
 ## Configuration
 
 All configuration is via environment variables:
@@ -167,6 +246,11 @@ All configuration is via environment variables:
 | `PORT` | Server port | `5002` |
 | `DATABASE_PATH` | SQLite database path | `/data/users.db` |
 | `LOG_LEVEL` | Logging level | `INFO` |
+| `RECORDER_URL` | OwnTracks Recorder on the internal network | `http://owntracks-recorder:8083` |
+| `TRACK_CACHE_DIR` | Per-user track/heatmap cache (must be on a persistent volume) | `/data/tracks` |
+| `TRACK_CLOSED_TTL_SECONDS` | Lifetime of a closed-range entry | `86400` |
+| `TRACK_MAX_ENTRIES_PER_USER` | LRU cap on cache entries per user | `24` |
+| `TRACK_INLINE_WINDOW_DAYS` | Longest fetch window computed inline (longer runs behind `202`) | `31` |
 
 ## Security Features
 
@@ -189,6 +273,11 @@ The `/auth/verify` endpoint validates HTTP Basic Auth credentials against the SQ
 | `auth.py` | Password hashing and validation utilities |
 | `config.py` | Configuration from environment variables |
 | `models.py` | SQLAlchemy database models |
+| `recorder.py` | Read-only client for the OwnTracks Recorder HTTP API |
+| `track.py` | Shared geometry pipeline: flight detection, thinning, buffer, dissolve, heat grid |
+| `track_cache.py` | Per-user cache with incremental refresh behind `/api/me/track` and `/api/me/heatmap` |
+| `aggregate.py` | Anonymised all-users road union behind `/api/aggregate-roads` |
+| `tests/` | `pytest` suite that runs without a recorder |
 | `Dockerfile` | Container build configuration |
 
 ## Troubleshooting
