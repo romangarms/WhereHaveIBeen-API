@@ -54,3 +54,6 @@ class Config:
     # Fetch windows up to this long are computed inline; longer ones run in the
     # background and the request returns 202.
     TRACK_INLINE_WINDOW_DAYS = int(os.getenv('TRACK_INLINE_WINDOW_DAYS', 31))
+    # An open-ended entry validated against the recorder this recently is
+    # served as-is, so a burst of reloads costs one recorder probe at most.
+    TRACK_MIN_REFRESH_SECONDS = int(os.getenv('TRACK_MIN_REFRESH_SECONDS', 15))

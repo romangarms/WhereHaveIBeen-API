@@ -33,6 +33,7 @@ CACHE_DIR = Config.TRACK_CACHE_DIR
 CLOSED_TTL_SECONDS = Config.TRACK_CLOSED_TTL_SECONDS
 MAX_ENTRIES_PER_USER = Config.TRACK_MAX_ENTRIES_PER_USER
 INLINE_WINDOW_DAYS = Config.TRACK_INLINE_WINDOW_DAYS
+MIN_REFRESH_SECONDS = Config.TRACK_MIN_REFRESH_SECONDS
 
 FETCH_WINDOW_DAYS = 30
 # The recorder reads from/to as UTC but at minute granularity; fetch wider and
@@ -99,6 +100,10 @@ class Entry:
         self.computed_at = None
         self.latest_tst = None
         self.earliest_tst = None
+        # In-memory only: when the recorder last confirmed there is nothing
+        # newer, and the serialized response for the current content.
+        self.checked_at = 0.0
+        self.body = None
         self.trackers = {d: track.DeviceTracker(FLIGHT_PARAMS) for d in spec.devices}
         self.driving = None
         self.flights_buffer = None
@@ -131,6 +136,7 @@ class Entry:
         e.computed_at = data["computed_at"]
         e.latest_tst = data["latest_tst"]
         e.earliest_tst = data.get("earliest_tst")
+        e.checked_at = e.computed_at or 0.0
         e.trackers = {d: track.DeviceTracker.from_state(s, FLIGHT_PARAMS)
                       for d, s in data["trackers"].items()}
         e.driving = shapely.from_wkb(data["driving"]) if data["driving"] else None
@@ -326,6 +332,8 @@ def update(entry, now_ts):
     entry.latest_tst = latest
     entry.earliest_tst = earliest
     entry.computed_at = now_ts
+    entry.checked_at = now_ts
+    entry.body = None
     log.info("track_cache: %s %s/%s updated with %d points in %.1fs",
              spec.kind, spec.username, spec.key, fetched, time.time() - t0)
 
@@ -416,6 +424,39 @@ def payload(entry):
     return base
 
 
+def response_bytes(entry):
+    """JSON body for the entry, built once per content change."""
+    if entry.body is None:
+        entry.body = json.dumps(payload(entry), separators=(",", ":")).encode()
+    return entry.body
+
+
+def etag(entry):
+    """Changes when the entry is recreated (refresh, expiry, new parameters)
+    or when newer fixes have been folded in; stable across freshness checks
+    that found nothing new."""
+    return '"%s-%d-%d"' % (entry.spec.key, int(entry.created_at),
+                          int(entry.latest_tst or 0))
+
+
+def _recorder_has_newer(entry):
+    """One cheap /api/0/last call instead of re-fetching the tail windows.
+    Any doubt (probe failure, unknown device) counts as "newer" so the full
+    path runs."""
+    try:
+        rows = recorder.last_fixes(entry.spec.username.lower())
+    except recorder.RecorderError as e:
+        log.warning("track_cache: last-fix probe failed for %s: %s", entry.spec.username, e)
+        return True
+    latest = entry.latest_tst if entry.latest_tst is not None else float("-inf")
+    for row in rows:
+        if row.get("device") in entry.spec.devices:
+            tst = row.get("tst")
+            if tst is None or tst > latest:
+                return True
+    return False
+
+
 def empty_payload(spec, now_ts):
     entry = Entry(spec)
     entry.computed_at = now_ts
@@ -448,9 +489,9 @@ def _run_background(entry, lock):
 
 def get_or_compute(spec, refresh=False):
     """
-    Returns (status, payload): status is "ok" (payload is the response body),
-    "computing" (a compute holds the key; poll again) or "error" (a background
-    compute failed; payload is the message).
+    Returns (status, value): status is "ok" (value is the Entry; see
+    response_bytes/etag), "computing" (a compute holds the key; poll again)
+    or "error" (a background compute failed; value is the message).
     """
     lock = _lock_for(spec.key)
     if not lock.acquire(blocking=False):
@@ -466,7 +507,12 @@ def get_or_compute(spec, refresh=False):
             entry = None
         if entry is not None and not spec.open_ended:
             _touch(spec)
-            return "ok", payload(entry)
+            return "ok", entry
+        if entry is not None and (now - entry.checked_at < MIN_REFRESH_SECONDS
+                                  or not _recorder_has_newer(entry)):
+            entry.checked_at = now
+            _touch(spec)
+            return "ok", entry
 
         if entry is not None:
             window_lower = entry.computed_at
@@ -479,7 +525,7 @@ def get_or_compute(spec, refresh=False):
             entry = entry or Entry(spec)
             update(entry, now)
             save_entry(entry)
-            return "ok", payload(entry)
+            return "ok", entry
 
         err = _errors.pop(spec.key, None)
         if err is not None:

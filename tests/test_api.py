@@ -34,10 +34,23 @@ def fake_recorder(monkeypatch):
         lo, hi = from_dt.timestamp(), to_dt.timestamp()
         return [p for p in pts if device == "phone" and lo <= p["tst"] <= hi]
 
+    calls = {"fetch": 0, "last": 0}
+
+    def counted_fetch(*a, **k):
+        calls["fetch"] += 1
+        return fetch_points(*a, **k)
+
+    def last_fixes(user):
+        assert user == "alice"
+        calls["last"] += 1
+        return [{"username": "alice", "device": "phone", "tst": pts[-1]["tst"]}]
+
     monkeypatch.setattr(recorder, "list_devices", list_devices)
     monkeypatch.setattr(recorder, "list_rec_months", list_rec_months)
-    monkeypatch.setattr(recorder, "fetch_points", fetch_points)
-    return {"base": base, "marks": marks, "fixes": shifted}
+    monkeypatch.setattr(recorder, "fetch_points", counted_fetch)
+    monkeypatch.setattr(recorder, "last_fixes", last_fixes)
+    monkeypatch.setattr(track_cache, "MIN_REFRESH_SECONDS", 0)
+    return {"base": base, "marks": marks, "fixes": shifted, "pts": pts, "calls": calls}
 
 
 def iso(ts):
@@ -187,3 +200,67 @@ def test_aggregate_gains_area_km2(monkeypatch):
     assert feature["properties"]["area_km2"] > 0
     assert feature["properties"]["max_vel"] == 850
     assert "stats-v3" in aggregate.PARAMS_FINGERPRINT
+
+
+def _warm_all_time(client):
+    for _ in range(100):
+        r = client.get("/api/me/track?device=phone", headers=basic("alice"))
+        if r.status_code == 200:
+            return r
+        time.sleep(0.1)
+    raise AssertionError("never warmed")
+
+
+def test_warm_request_probes_last_fix_instead_of_refetching(client, fake_recorder):
+    _warm_all_time(client)
+    calls = fake_recorder["calls"]
+    fetched, probed = calls["fetch"], calls["last"]
+    r = client.get("/api/me/track?device=phone", headers=basic("alice"))
+    assert r.status_code == 200
+    assert calls["fetch"] == fetched
+    assert calls["last"] == probed + 1
+
+
+def test_min_refresh_window_skips_the_probe(client, fake_recorder, monkeypatch):
+    _warm_all_time(client)
+    monkeypatch.setattr(track_cache, "MIN_REFRESH_SECONDS", 60)
+    probed = fake_recorder["calls"]["last"]
+    client.get("/api/me/track?device=phone", headers=basic("alice"))
+    assert fake_recorder["calls"]["last"] == probed
+
+
+def test_etag_304_and_invalidation(client, fake_recorder, monkeypatch):
+    r = _warm_all_time(client)
+    etag = r.headers["ETag"]
+    assert r.headers["Cache-Control"] == "private, no-cache"
+
+    r2 = client.get("/api/me/track?device=phone", headers={**basic("alice"), "If-None-Match": etag})
+    assert r2.status_code == 304 and r2.headers["ETag"] == etag and r2.data == b""
+
+    # refresh=1 recreates the entry: always a body, and a new tag afterwards.
+    r3 = client.get("/api/me/track?device=phone&refresh=1",
+                    headers={**basic("alice"), "If-None-Match": etag})
+    while r3.status_code == 202:
+        time.sleep(0.1)
+        r3 = client.get("/api/me/track?device=phone", headers={**basic("alice"), "If-None-Match": etag})
+    assert r3.status_code == 200 and r3.headers["ETag"] != etag
+    etag = r3.headers["ETag"]
+
+    # A newer fix on the device: the probe sees it, the entry extends, the tag changes.
+    pts = fake_recorder["pts"]
+    last = pts[-1]
+    pts.append({**last, "tst": last["tst"] + 600, "lat": last["lat"] + 0.01})
+    r4 = client.get("/api/me/track?device=phone", headers={**basic("alice"), "If-None-Match": etag})
+    assert r4.status_code == 200
+    assert r4.headers["ETag"] != etag
+    assert r4.get_json()["latest_tst"] == last["tst"] + 600
+
+
+def test_aggregate_etag(client, fake_recorder, monkeypatch):
+    feature = {"type": "Feature", "properties": {}, "geometry": None}
+    monkeypatch.setattr(aggregate, "_cache", {"geojson": feature, "computed_at": 1700000000.0,
+                                              "params_fingerprint": aggregate.PARAMS_FINGERPRINT})
+    r = client.get("/api/aggregate-roads", headers=basic("alice"))
+    assert r.status_code == 200 and r.headers["ETag"] == '"agg-1700000000"'
+    r2 = client.get("/api/aggregate-roads", headers={**basic("alice"), "If-None-Match": r.headers["ETag"]})
+    assert r2.status_code == 304

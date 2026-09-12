@@ -9,7 +9,7 @@ import base64
 import os
 import re
 import time
-from flask import Flask, request, jsonify
+from flask import Flask, Response, request, jsonify
 from datetime import datetime
 
 # Import our modules
@@ -151,6 +151,28 @@ def _parse_me_args(user, kind):
         raise _BadRequest(str(e))
 
 
+CACHE_CONTROL = 'private, no-cache'
+
+
+def _matches_etag(etag):
+    """True if the request's If-None-Match names this ETag (weak or strong)."""
+    header = request.headers.get('If-None-Match', '')
+    tags = [t.strip() for t in header.split(',')]
+    return any(t == etag or t == 'W/' + etag or t == '*' for t in tags if t)
+
+
+def _cached_json(body, etag, refresh):
+    """200 with the body, or 304 when the client already holds this ETag.
+    refresh=1 always sends the body so a forced recompute is visible."""
+    if not refresh and _matches_etag(etag):
+        resp = Response(status=304)
+    else:
+        resp = Response(body, mimetype='application/json')
+    resp.headers['ETag'] = etag
+    resp.headers['Cache-Control'] = CACHE_CONTROL
+    return resp
+
+
 def _me_endpoint(kind):
     user, denied = _require_user()
     if denied:
@@ -166,8 +188,9 @@ def _me_endpoint(kind):
     if not spec.devices:
         return jsonify(track_cache.empty_payload(spec, time.time())), 200
 
+    refresh = request.args.get('refresh') == '1'
     try:
-        status, body = track_cache.get_or_compute(spec, refresh=request.args.get('refresh') == '1')
+        status, value = track_cache.get_or_compute(spec, refresh=refresh)
     except recorder.RecorderError as e:
         app.logger.error(f"{kind}: recorder error for {user.username}: {e}")
         return jsonify({"error": "Location recorder unavailable"}), 502
@@ -176,9 +199,9 @@ def _me_endpoint(kind):
         resp.headers['Retry-After'] = str(track_cache.RETRY_AFTER_SECONDS)
         return resp, 202
     if status == "error":
-        app.logger.error(f"{kind}: compute failed for {user.username}: {body}")
+        app.logger.error(f"{kind}: compute failed for {user.username}: {value}")
         return jsonify({"error": "Computation failed, retry to start again"}), 502
-    return jsonify(body), 200
+    return _cached_json(track_cache.response_bytes(value), track_cache.etag(value), refresh)
 
 
 @app.route('/api/me/devices', methods=['GET'])
@@ -225,12 +248,13 @@ def aggregate_roads():
     if denied:
         return denied
 
-    geojson, ready = aggregate.get_cached_or_compute(force=request.args.get('refresh') == '1')
+    refresh = request.args.get('refresh') == '1'
+    geojson, ready = aggregate.get_cached_or_compute(force=refresh)
     if not ready:
         resp = jsonify({"error": "Aggregate is being computed, try again shortly."})
         resp.headers['Retry-After'] = '30'
         return resp, 503
-    return jsonify(geojson), 200
+    return _cached_json(aggregate.response_bytes(), aggregate.etag(), refresh)
 
 
 @app.route('/auth/verify', methods=['GET'])

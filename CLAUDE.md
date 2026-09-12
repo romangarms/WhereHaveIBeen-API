@@ -141,6 +141,7 @@ All via environment variables (see `.env.example`):
 | `TRACK_CLOSED_TTL_SECONDS` | `86400` | How long a closed-range (`to` given) entry is served before recompute. |
 | `TRACK_MAX_ENTRIES_PER_USER` | `24` | LRU cap per user; open-ended all-time entries are evicted last. |
 | `TRACK_INLINE_WINDOW_DAYS` | `31` | Fetch windows up to this long compute inline; longer ones run in a background thread behind a `202`. |
+| `TRACK_MIN_REFRESH_SECONDS` | `15` | Open-ended entries validated this recently skip the `/api/0/last` freshness probe. Responses carry `ETag` + `Cache-Control: private, no-cache`; `If-None-Match` gets a `304`. |
 
 ## Key Design Decisions
 

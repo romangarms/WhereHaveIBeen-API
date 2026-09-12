@@ -229,6 +229,19 @@ are recomputed after `TRACK_CLOSED_TTL_SECONDS`. Each user keeps at most
 `TRACK_MAX_ENTRIES_PER_USER` entries (LRU, open-ended all-time entries evicted
 last).
 
+Freshness: a warm open-ended entry is validated with one recorder call
+(`/api/0/last`) per request; only when a device has a newer fix are the new
+points fetched and folded in. Entries validated within
+`TRACK_MIN_REFRESH_SECONDS` are served without even that call. `computed_at`
+is therefore the time the geometry last changed, not the time of the request.
+
+Conditional requests: every `200` carries an `ETag` and
+`Cache-Control: private, no-cache`. Send the tag back in `If-None-Match` to
+get a `304` when nothing changed. The tag changes when newer fixes were folded
+in, when the entry was recreated (`refresh=1`, TTL expiry, new parameters) and
+never otherwise, so a `304` is only possible after the server verified the
+recorder has nothing newer. `/api/aggregate-roads` behaves the same way.
+
 ### Aggregate Roads
 
 ```
@@ -254,6 +267,7 @@ All configuration is via environment variables:
 | `TRACK_CLOSED_TTL_SECONDS` | Lifetime of a closed-range entry | `86400` |
 | `TRACK_MAX_ENTRIES_PER_USER` | LRU cap on cache entries per user | `24` |
 | `TRACK_INLINE_WINDOW_DAYS` | Longest fetch window computed inline (longer runs behind `202`) | `31` |
+| `TRACK_MIN_REFRESH_SECONDS` | Serve an open-ended entry without re-checking the recorder for this long | `15` |
 
 ## Security Features
 

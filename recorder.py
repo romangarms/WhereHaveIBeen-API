@@ -60,6 +60,12 @@ def list_devices(user):
         raise
 
 
+def last_fixes(user):
+    """Newest fix per device, as returned by /api/0/last (one row per device)."""
+    rows = get("/api/0/last", user=user)
+    return rows if isinstance(rows, list) else []
+
+
 def list_rec_months(user, device):
     """Months with stored data for a device, as (year, month) tuples, ascending."""
     try:

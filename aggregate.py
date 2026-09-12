@@ -193,6 +193,23 @@ def _start_background_compute():
     threading.Thread(target=_run_compute, daemon=True).start()
 
 
+def etag():
+    return '"agg-%d"' % int(_cache["computed_at"])
+
+
+_body = (None, None)  # (computed_at, serialized feature)
+
+
+def response_bytes():
+    """Serialized once per compute; the feature can run to hundreds of KB.
+    Kept outside the cache dict so the persisted JSON stays plain."""
+    global _body
+    entry = _cache
+    if _body[0] != entry["computed_at"]:
+        _body = (entry["computed_at"], json.dumps(entry["geojson"], separators=(",", ":")).encode())
+    return _body[1]
+
+
 def get_cached_or_compute(force=False):
     """
     Return (geojson, ready).
