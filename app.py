@@ -16,12 +16,13 @@ from datetime import datetime
 # Import our modules
 from config import Config
 
-logging.basicConfig(level=Config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 from models import db, User
 from auth import hash_password, verify_password, validate_password
 import aggregate
 import recorder
 import track_cache
+
+logging.basicConfig(level=Config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = Flask(__name__)
 app.config.from_object(Config)
