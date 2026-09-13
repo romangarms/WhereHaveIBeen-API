@@ -65,6 +65,11 @@ curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/heatmap?from
 curl -u testuser:SecurePass123! "https://mini.romangarms.com/api/me/heatmap?from=2026-09-01T00:00:00Z&refresh=1" | jq .computed_at
 # Auth paths: no credentials -> 401 with WWW-Authenticate, inactive account -> 403
 curl -si https://mini.romangarms.com/api/me/devices | head -3
+# Google Maps Timeline import: upload the raw export, list it, remove it
+curl -u testuser:SecurePass123! -X PUT --data-binary @location-history.json \
+  -H 'Content-Type: application/json' https://mini.romangarms.com/api/me/imports/google-timeline
+curl -u testuser:SecurePass123! https://mini.romangarms.com/api/me/imports
+curl -u testuser:SecurePass123! -X DELETE https://mini.romangarms.com/api/me/imports/google-timeline
 ```
 
 Unit tests run without a recorder:
@@ -142,6 +147,8 @@ All via environment variables (see `.env.example`):
 | `TRACK_MAX_ENTRIES_PER_USER` | `24` | LRU cap per user; open-ended all-time entries are evicted last. |
 | `TRACK_INLINE_WINDOW_DAYS` | `31` | Fetch windows up to this long compute inline; longer ones run in a background thread behind a `202`. |
 | `TRACK_MIN_REFRESH_SECONDS` | `15` | Open-ended entries validated this recently skip the `/api/0/last` freshness probe. Responses carry `ETag` + `Cache-Control: private, no-cache`; `If-None-Match` gets a `304`. |
+| `IMPORT_DIR` | `/data/imports` | Imported history (`<dir>/<username>/<source>.pkl` + `.json` meta). On the `/data` volume. |
+| `IMPORT_MAX_BYTES` | `64 MB` | Cap on one uploaded export; the body is decoded in memory. |
 
 ## Key Design Decisions
 
@@ -151,3 +158,4 @@ All via environment variables (see `.env.example`):
 - **No auth on `/api/*`** — registration endpoint is open; ForwardAuth only protects OwnTracks routes. `/api/aggregate-roads` and `/api/me/*` validate Basic auth in-handler via `_require_user()`.
 - **Per-user endpoints (`/api/me/devices`, `/api/me/track`, `/api/me/heatmap`)** — the recorder is only ever queried for the authenticated username. Geometry comes from `track.py` (episodic flight detection ported from the web app's `detectFlights`, buffer + dissolve in local AEQD projections); `track_cache.py` keeps one pickled entry per (user, devices, buffer, range) and extends open-ended entries incrementally by holding the streaming `DeviceTracker` state. `recorder.py` always passes `from`, because the recorder defaults an omitted `from` to six hours ago, and finds the start of history from the device's `YYYY-MM.rec` listing.
 - **Single `users` table** — flat schema with `username`, `password_hash`, `owntracks_device`, `is_active`, timestamps
+- **Imported history (`/api/me/imports/*`)** — `google_timeline.py` turns a Google Maps Timeline export into Fixes (timelinePath first; visit/activity places only for spans no path point covers, since those are often hundreds of km off; single-point spikes dropped). `imports.py` stores them per user and `track_cache.update` feeds them as a pseudo-device `import:<source>` after the recorder fixes, skipping any UTC day the recorder has a fix on, so OwnTracks always wins on overlap. The import fingerprint is part of every cache key, so an upload or delete starts fresh entries; imported fixes carry no vel/alt and rely on the 100 km jump rule for flights.

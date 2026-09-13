@@ -6,6 +6,7 @@ OwnTracks Basic Auth credentials against the SQLite database.
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -19,6 +20,8 @@ from config import Config
 from models import db, User
 from auth import hash_password, verify_password, validate_password
 import aggregate
+import google_timeline
+import imports
 import recorder
 import track_cache
 
@@ -26,6 +29,7 @@ logging.basicConfig(level=Config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(
 
 app = Flask(__name__)
 app.config.from_object(Config)
+app.config['MAX_CONTENT_LENGTH'] = Config.IMPORT_MAX_BYTES
 
 # Initialize database
 db.init_app(app)
@@ -149,8 +153,13 @@ def _parse_me_args(user, kind):
         if device not in devices:
             raise _BadRequest("Unknown device")
         devices = [device]
+    # Imported history belongs to the account, not to a device, so it is part
+    # of every query.
+    sources = sorted(imports.list_imports(user.username))
     try:
-        return track_cache.Spec(kind, user.username, devices, from_ts, to_ts, buffer_m)
+        return track_cache.Spec(kind, user.username, devices, from_ts, to_ts, buffer_m,
+                                import_sources=sources,
+                                imports_fp=imports.fingerprint(user.username))
     except ValueError as e:
         raise _BadRequest(str(e))
 
@@ -189,7 +198,7 @@ def _me_endpoint(kind):
         app.logger.error(f"{kind}: recorder error for {user.username}: {e}")
         return jsonify({"error": "Location recorder unavailable"}), 502
 
-    if not spec.devices:
+    if not spec.devices and not spec.import_sources:
         return jsonify(track_cache.empty_payload(spec, time.time())), 200
 
     refresh = request.args.get('refresh') == '1'
@@ -232,6 +241,73 @@ def me_track():
 @app.route('/api/me/heatmap', methods=['GET'])
 def me_heatmap():
     return _me_endpoint('heatmap')
+
+
+def _import_rows(username):
+    meta = imports.list_imports(username)
+    return [meta[s] for s in sorted(meta)]
+
+
+@app.route('/api/me/imports', methods=['GET'])
+def me_imports():
+    user, denied = _require_user()
+    if denied:
+        return denied
+    return jsonify({"imports": _import_rows(user.username)}), 200
+
+
+@app.route('/api/me/imports/<source>', methods=['PUT'])
+def me_import_put(source):
+    """
+    Replace the user's import from one source with the uploaded export file
+    (the request body is the raw JSON the provider produced). Every cached
+    track for the user is dropped so the next /api/me/* call recomputes with
+    the new history.
+    """
+    user, denied = _require_user()
+    if denied:
+        return denied
+    if source not in imports.SOURCES:
+        return jsonify({"error": "Unknown import source"}), 404
+    body = request.get_data(cache=False)
+    if not body:
+        return jsonify({"error": "Empty upload"}), 400
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return jsonify({"error": "The file is not valid JSON"}), 400
+    del body
+    try:
+        fixes, meta = google_timeline.parse(data)
+    except google_timeline.TimelineFormatError as e:
+        return jsonify({"error": f"Not a Google Maps Timeline export: {e}"}), 400
+    del data
+    if not fixes:
+        return jsonify({"error": "The export contains no usable location points"}), 400
+    row = imports.save(user.username, source, fixes, meta)
+    track_cache.clear_user(user.username)
+    app.logger.info(f"imports: {user.username} imported {len(fixes)} points from {source}")
+    return jsonify(row), 200
+
+
+@app.route('/api/me/imports/<source>', methods=['DELETE'])
+def me_import_delete(source):
+    user, denied = _require_user()
+    if denied:
+        return denied
+    if source not in imports.SOURCES:
+        return jsonify({"error": "Unknown import source"}), 404
+    removed = imports.delete(user.username, source)
+    if removed:
+        track_cache.clear_user(user.username)
+        app.logger.info(f"imports: {user.username} removed {source}")
+    return jsonify({"removed": removed}), 200
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    limit_mb = Config.IMPORT_MAX_BYTES // (1024 * 1024)
+    return jsonify({"error": f"Upload too large (limit {limit_mb} MB)"}), 413
 
 
 @app.route('/api/health', methods=['GET'])

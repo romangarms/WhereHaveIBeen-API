@@ -174,6 +174,15 @@ an inactive account returns `403`, bad parameters return `400` with
 | `GET /api/me/devices` | `{"username": "alice", "devices": ["phone", "ipad"]}`. Also a cheap credential check at sign-in. |
 | `GET /api/me/track` | Buffered "explored" corridor, flight lines, flight corridor and stats for a date range. |
 | `GET /api/me/heatmap` | Visit-frequency grid for a date range. |
+| `GET /api/me/imports` | Imported history on file: `{"imports": [{"source", "points", "first_tst", "last_tst", "imported_at", "counts", ...}]}`. |
+| `PUT /api/me/imports/google-timeline` | Body is the raw Google Maps Timeline export (phone "Export Timeline data" JSON or Takeout `Records.json`, up to `IMPORT_MAX_BYTES`). Replaces any earlier import and drops the user's cached tracks. `400` for unreadable files, `413` when too large. |
+| `DELETE /api/me/imports/google-timeline` | Removes the import; `{"removed": true|false}`. |
+
+Imported history belongs to the account, not to a device, so it is part of
+every track and heatmap regardless of `device`. The recorder wins wherever it
+was running: on any UTC day that has a recorder fix, imported points are
+skipped. The track and heatmap responses report the outcome per source in
+`"imports": {"google-timeline": {"points": <used>, "skipped": <dropped>}}`.
 
 **Query parameters** (`/api/me/track` and `/api/me/heatmap`):
 
@@ -270,6 +279,8 @@ All configuration is via environment variables:
 | `TRACK_MAX_ENTRIES_PER_USER` | LRU cap on cache entries per user | `24` |
 | `TRACK_INLINE_WINDOW_DAYS` | Longest fetch window computed inline (longer runs behind `202`) | `31` |
 | `TRACK_MIN_REFRESH_SECONDS` | Serve an open-ended entry without re-checking the recorder for this long | `15` |
+| `IMPORT_DIR` | Imported history per user (must be on a persistent volume) | `/data/imports` |
+| `IMPORT_MAX_BYTES` | Largest export file accepted by `PUT /api/me/imports/*` | `67108864` (64 MB) |
 
 ## Security Features
 
@@ -295,6 +306,8 @@ The `/auth/verify` endpoint validates HTTP Basic Auth credentials against the SQ
 | `recorder.py` | Read-only client for the OwnTracks Recorder HTTP API |
 | `track.py` | Shared geometry pipeline: flight detection, thinning, buffer, dissolve, heat grid |
 | `track_cache.py` | Per-user cache with incremental refresh behind `/api/me/track` and `/api/me/heatmap` |
+| `imports.py` | Storage for imported history and the recorder-wins overlap rule |
+| `google_timeline.py` | Google Maps Timeline export parser (phone export and Takeout `Records.json`) |
 | `aggregate.py` | Anonymised all-users road union behind `/api/aggregate-roads` |
 | `tests/` | `pytest` suite that runs without a recorder |
 | `Dockerfile` | Container build configuration |

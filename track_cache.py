@@ -7,6 +7,12 @@ so a request only fetches points newer than latest_tst and unions the new
 corridor pieces into the stored geometry. Closed entries are computed once and
 expire after TRACK_CLOSED_TTL_SECONDS because late uploads can add points to
 a past range.
+
+Imported history (imports.py) joins each entry as pseudo-devices named
+"import:<source>". Their fixes are fed after the recorder's for the same
+window, skipping every overlap bucket (UTC day) the recorder has a fix in, so
+OwnTracks wins wherever it was recording. The imports fingerprint is part of
+the cache key, so changing an import starts a fresh entry.
 """
 
 import hashlib
@@ -24,6 +30,7 @@ import numpy as np
 import shapely
 from shapely.geometry import mapping
 
+import imports
 import recorder
 import track
 from config import Config
@@ -51,7 +58,7 @@ COORD_DECIMALS = 6
 
 FLIGHT_PARAMS = track.DEFAULT_FLIGHT_PARAMS
 PARAMS_FINGERPRINT = "|".join(str(x) for x in [
-    "track-v2", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
+    "track-v3", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
     FLIGHT_PARAMS.entry_kmh, FLIGHT_PARAMS.entry_alt_m, FLIGHT_PARAMS.entry_jump_km,
     FLIGHT_PARAMS.exit_kmh, FLIGHT_PARAMS.lookback_s, FLIGHT_PARAMS.stale_s,
     FLIGHT_PARAMS.acc_max_m, FLIGHT_PARAMS.min_dist_m,
@@ -70,18 +77,24 @@ _indexes = {}
 class Spec:
     """Identifies one cache entry."""
 
-    def __init__(self, kind, username, devices, from_ts=None, to_ts=None, buffer_m=None):
+    def __init__(self, kind, username, devices, from_ts=None, to_ts=None, buffer_m=None,
+                 import_sources=(), imports_fp=""):
         if not _SAFE_USERNAME.match(username):
             raise ValueError("username is not a safe path segment")
         self.kind = kind
         self.username = username
         self.devices = sorted(devices)
+        self.import_sources = sorted(import_sources)
         self.from_ts = from_ts
         self.to_ts = to_ts
         self.buffer_m = buffer_m if kind == "track" else None
         raw = json.dumps([username, self.devices, self.buffer_m, from_ts, to_ts, kind,
-                          PARAMS_FINGERPRINT])
+                          PARAMS_FINGERPRINT, imports_fp])
         self.key = hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+    @property
+    def tracker_names(self):
+        return self.devices + [imports.device_name(s) for s in self.import_sources]
 
     @property
     def open_ended(self):
@@ -103,12 +116,14 @@ class Entry:
         self.computed_at = None
         self.latest_tst = None
         self.earliest_tst = None
+        self.latest_recorder_tst = None
+        self.import_stats = {s: {"points": 0, "skipped": 0} for s in spec.import_sources}
         # In-memory only: when the recorder last confirmed there is nothing
         # newer, and the serialized response for the current content.
         self.checked_at = 0.0
         self.body = None
         self.progress = None
-        self.trackers = {d: track.DeviceTracker(FLIGHT_PARAMS) for d in spec.devices}
+        self.trackers = {d: track.DeviceTracker(FLIGHT_PARAMS) for d in spec.tracker_names}
         self.driving = None
         self.flights_buffer = None
         self.driving_area = 0.0
@@ -122,6 +137,8 @@ class Entry:
             "computed_at": self.computed_at,
             "latest_tst": self.latest_tst,
             "earliest_tst": self.earliest_tst,
+            "latest_recorder_tst": self.latest_recorder_tst,
+            "import_stats": self.import_stats,
             "trackers": {d: t.to_state() for d, t in self.trackers.items()},
             "driving": shapely.to_wkb(self.driving) if self.driving is not None else None,
             "flights_buffer": (shapely.to_wkb(self.flights_buffer)
@@ -140,6 +157,8 @@ class Entry:
         e.computed_at = data["computed_at"]
         e.latest_tst = data["latest_tst"]
         e.earliest_tst = data.get("earliest_tst")
+        e.latest_recorder_tst = data.get("latest_recorder_tst")
+        e.import_stats = data.get("import_stats", e.import_stats)
         e.checked_at = e.computed_at or 0.0
         e.trackers = {d: track.DeviceTracker.from_state(s, FLIGHT_PARAMS)
                       for d, s in data["trackers"].items()}
@@ -246,6 +265,22 @@ def delete_entry(spec):
         pass
 
 
+def clear_user(username):
+    """Drop every cached entry for a user, on disk and in memory."""
+    with _meta_lock:
+        idx = _index(username)
+        keys = list(idx)
+        idx.clear()
+        for key in keys:
+            _entries.pop(key, None)
+            try:
+                os.remove(os.path.join(_user_dir(username), key + ".pkl"))
+            except FileNotFoundError:
+                pass
+        if keys:
+            _write_index(username)
+
+
 def _evict_locked(username, keep):
     idx = _index(username)
     while len(idx) > MAX_ENTRIES_PER_USER:
@@ -304,8 +339,21 @@ def update(entry, now_ts):
     user = spec.username.lower()
     latest = entry.latest_tst
     earliest = entry.earliest_tst
+    latest_recorder = entry.latest_recorder_tst
+    covered = set()
+    if latest_recorder is not None:
+        covered.add(imports.bucket(latest_recorder))
     fetched = 0
     changed = False
+
+    def fold(device, fixes):
+        nonlocal latest, earliest, changed
+        latest = fixes[-1].tst if latest is None else max(latest, fixes[-1].tst)
+        earliest = fixes[0].tst if earliest is None else min(earliest, fixes[0].tst)
+        if spec.kind == "track":
+            changed |= _apply(entry, entry.trackers[device].feed(fixes))
+        else:
+            track.add_heat_cells(fixes, entry.cells, FLIGHT_PARAMS.acc_max_m)
 
     plan = []
     for device in spec.devices:
@@ -322,23 +370,35 @@ def update(entry, now_ts):
         for ws, we in recorder.windows(start - FETCH_MARGIN, end + FETCH_MARGIN, FETCH_WINDOW_DAYS):
             plan.append((device, ws, we))
 
-    entry.progress = {"stage": "fetching", "done": 0, "total": len(plan) + 1}
+    entry.progress = {"stage": "fetching", "done": 0,
+                      "total": len(plan) + len(spec.import_sources) + 1}
     try:
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             futures = [pool.submit(recorder.fetch_points, user, d, ws, we) for d, ws, we in plan]
             for (device, ws, we), future in zip(plan, futures):
                 fixes = track.fixes_from_points(future.result())
+                # Fixes outside the window (the fetch margin) still prove the
+                # recorder was running that day.
+                imports.covered_buckets(fixes, covered)
                 fixes = [f for f in fixes if f.tst <= upper and (
                     lower is None or f.tst > lower or (lower_inclusive and f.tst == lower))]
                 if fixes:
                     fetched += len(fixes)
-                    latest = fixes[-1].tst if latest is None else max(latest, fixes[-1].tst)
-                    earliest = fixes[0].tst if earliest is None else min(earliest, fixes[0].tst)
-                    if spec.kind == "track":
-                        changed |= _apply(entry, entry.trackers[device].feed(fixes))
-                    else:
-                        track.add_heat_cells(fixes, entry.cells, FLIGHT_PARAMS.acc_max_m)
+                    latest_recorder = (fixes[-1].tst if latest_recorder is None
+                                       else max(latest_recorder, fixes[-1].tst))
+                    fold(device, fixes)
                 entry.progress["done"] += 1
+
+        for source in spec.import_sources:
+            fixes, skipped = imports.select(imports.load_fixes(spec.username, source),
+                                            lower, lower_inclusive, upper, covered)
+            stats = entry.import_stats.setdefault(source, {"points": 0, "skipped": 0})
+            stats["points"] += len(fixes)
+            stats["skipped"] += skipped
+            if fixes:
+                fetched += len(fixes)
+                fold(imports.device_name(source), fixes)
+            entry.progress["done"] += 1
 
         entry.progress["stage"] = "building"
         if spec.kind == "track":
@@ -353,6 +413,7 @@ def update(entry, now_ts):
 
     entry.latest_tst = latest
     entry.earliest_tst = earliest
+    entry.latest_recorder_tst = latest_recorder
     entry.computed_at = now_ts
     entry.checked_at = now_ts
     entry.body = None
@@ -403,7 +464,9 @@ def payload(entry):
     base = {"range": _range(spec, entry.computed_at),
             "computed_at": int(entry.computed_at),
             "latest_tst": int(entry.latest_tst) if entry.latest_tst is not None else None,
-            "earliest_tst": int(entry.earliest_tst) if entry.earliest_tst is not None else None}
+            "earliest_tst": int(entry.earliest_tst) if entry.earliest_tst is not None else None,
+            "imports": {s: dict(entry.import_stats.get(s, {"points": 0, "skipped": 0}))
+                        for s in spec.import_sources}}
     if spec.kind == "heatmap":
         base["cell_deg"] = track.HEATMAP_CELL_DEG
         base["cells"] = [[gx, gy, n] for (gx, gy), n in sorted(entry.cells.items())]

@@ -57,3 +57,8 @@ class Config:
     # An open-ended entry validated against the recorder this recently is
     # served as-is, so a burst of reloads costs one recorder probe at most.
     TRACK_MIN_REFRESH_SECONDS = int(os.getenv('TRACK_MIN_REFRESH_SECONDS', 15))
+
+    # --- Imported history (/api/me/imports) ---
+    IMPORT_DIR = os.getenv('IMPORT_DIR', '/data/imports')
+    # Upload cap for one export file; the whole body is decoded in memory.
+    IMPORT_MAX_BYTES = int(os.getenv('IMPORT_MAX_BYTES', 64 * 1024 * 1024))

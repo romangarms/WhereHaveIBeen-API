@@ -15,6 +15,8 @@ COPY aggregate.py .
 COPY recorder.py .
 COPY track.py .
 COPY track_cache.py .
+COPY imports.py .
+COPY google_timeline.py .
 
 # Create directory for database
 RUN mkdir -p /opt/usermanagement/database

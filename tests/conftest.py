@@ -4,6 +4,7 @@ import tempfile
 _TMP = tempfile.mkdtemp(prefix="whib-tests-")
 os.environ["DATABASE_PATH"] = os.path.join(_TMP, "users.db")
 os.environ["TRACK_CACHE_DIR"] = os.path.join(_TMP, "tracks")
+os.environ["IMPORT_DIR"] = os.path.join(_TMP, "imports")
 os.environ["AGGREGATE_CACHE_PATH"] = os.path.join(_TMP, "aggregate.json")
 os.environ["RECORDER_URL"] = "http://127.0.0.1:9"
 os.environ["RECORDER_TIMEOUT"] = "1"
