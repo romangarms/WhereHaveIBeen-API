@@ -173,6 +173,21 @@ def test_select_skips_recorder_days():
     assert [f.tst for f in kept] == [T0 + 2 * DAY]
 
 
+def test_load_upgrades_speedless_import_in_place():
+    cruise = path_segment(T0, [(6 * i, 47.0 + i * 0.75, -122.0) for i in range(8)])
+    fixes, meta = google_timeline.parse([cruise])
+    stale = [f._replace(vel=0.0) for f in fixes]
+    imports.save("dave", "google-timeline", stale, meta)
+    try:
+        loaded = imports.load_fixes("dave", "google-timeline")
+        assert loaded == fixes
+        with open(imports._paths("dave", "google-timeline")[0], "rb") as fh:
+            import pickle
+            assert [f.vel for f in loaded] == [row[3] for row in pickle.load(fh)]
+    finally:
+        imports.delete("dave", "google-timeline")
+
+
 def test_storage_roundtrip_and_fingerprint():
     fixes, meta = google_timeline.parse(sample_export())
     assert imports.list_imports("carol") == {}

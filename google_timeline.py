@@ -230,6 +230,13 @@ def _derive_speeds(fixes):
     return out
 
 
+def with_speeds(fixes):
+    """Fixes with estimated speeds when the source supplied none."""
+    if fixes and not any(f.vel for f in fixes):
+        return _derive_speeds(fixes)
+    return fixes
+
+
 def parse(data):
     """Decoded export JSON -> (fixes sorted by strictly increasing tst, meta).
     Raises TimelineFormatError when the layout is not recognised."""
@@ -251,8 +258,7 @@ def parse(data):
     else:
         fixes, counts = _parse_segments(items)
     fixes, counts["outliers"] = _drop_outliers(_monotonic(fixes))
-    if not any(f.vel for f in fixes):
-        fixes = _derive_speeds(fixes)
+    fixes = with_speeds(fixes)
     meta = {"layout": layout, "segments": len(items), "counts": counts, "points": len(fixes)}
     if fixes:
         meta["first_tst"] = int(fixes[0].tst)

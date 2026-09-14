@@ -106,10 +106,7 @@ def save(username, source, fixes, meta):
     row = dict(meta)
     row["source"] = source
     row["imported_at"] = int(time.time())
-    tmp = pkl + ".tmp"
-    with open(tmp, "wb") as fh:
-        pickle.dump([tuple(f) for f in fixes], fh, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(tmp, pkl)
+    _write_fixes(pkl, fixes)
     tmp = js + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(row, fh)
@@ -134,14 +131,29 @@ def delete(username, source):
     return removed
 
 
+def _write_fixes(pkl, fixes):
+    tmp = pkl + ".tmp"
+    with open(tmp, "wb") as fh:
+        pickle.dump([tuple(f) for f in fixes], fh, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, pkl)
+
+
 def load_fixes(username, source):
+    """Stored fixes. An import stored before speeds were estimated is
+    upgraded in place on first load."""
+    import google_timeline
     from track import Fix
     pkl, _ = _paths(username, source)
     try:
         with open(pkl, "rb") as fh:
-            return [Fix(*f) for f in pickle.load(fh)]
+            fixes = [Fix(*f) for f in pickle.load(fh)]
     except FileNotFoundError:
         return []
+    upgraded = google_timeline.with_speeds(fixes)
+    if upgraded is not fixes:
+        _write_fixes(pkl, upgraded)
+        log.info("imports: estimated speeds for %s/%s", username, source)
+    return upgraded
 
 
 def bucket(tst):

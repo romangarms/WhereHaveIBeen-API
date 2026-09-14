@@ -58,7 +58,7 @@ COORD_DECIMALS = 6
 
 FLIGHT_PARAMS = track.DEFAULT_FLIGHT_PARAMS
 PARAMS_FINGERPRINT = "|".join(str(x) for x in [
-    "track-v3", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
+    "track-v4", SIMPLIFY_M, OUT_SIMPLIFY_M, track.HEATMAP_CELL_DEG, track.CHUNK_KM, track.DENSIFY_KM,
     FLIGHT_PARAMS.entry_kmh, FLIGHT_PARAMS.entry_alt_m, FLIGHT_PARAMS.entry_jump_km,
     FLIGHT_PARAMS.exit_kmh, FLIGHT_PARAMS.lookback_s, FLIGHT_PARAMS.stale_s,
     FLIGHT_PARAMS.acc_max_m, FLIGHT_PARAMS.min_dist_m,
