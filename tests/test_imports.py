@@ -108,6 +108,27 @@ def test_outlier_spike_dropped_but_relocation_kept():
     assert [round(f.lat, 2) for f in fixes] == [20.9, 20.9, 20.9, 47.6, 47.6, 47.6]
 
 
+def test_midflight_backtrack_dropped_but_layover_kept():
+    sea, idaho, home, msp = (47.45, -122.30), (47.33, -115.34), (47.69, -122.39), (44.86, -93.12)
+    # Over Idaho at cruise, then a stale home point, then the real arrival.
+    fixes, meta = google_timeline.parse([path_segment(T0, [(0, *sea), (30, *idaho), (57, *home),
+                                                           (188, *msp), (190, 44.87, -93.09)])])
+    assert meta["counts"]["outliers"] == 1
+    assert [round(f.lon, 2) for f in fixes] == [-122.3, -115.34, -93.12, -93.09]
+    # A connection roughly on the way is a real stop.
+    den, ord_ = (39.86, -104.67), (41.97, -87.90)
+    fixes, meta = google_timeline.parse([path_segment(T0, [(0, *sea), (150, *den), (300, *ord_)])])
+    assert meta["counts"]["outliers"] == 0
+    assert len(fixes) == 3
+    # An out-and-back over days is slow on both legs and stays.
+    mel, bne = (-37.82, 144.97), (-27.26, 153.11)
+    fixes, meta = google_timeline.parse([path_segment(T0, [(0, *mel)]),
+                                         path_segment(T0 + 2 * DAY, [(0, *bne)]),
+                                         path_segment(T0 + 5 * DAY, [(0, *mel)])])
+    assert meta["counts"]["outliers"] == 0
+    assert len(fixes) == 3
+
+
 def test_derived_speed_flags_inflight_path_points():
     """Points every 6 minutes at cruise speed are closer than the jump rule but
     must still read as a flight; a freeway drive must not."""

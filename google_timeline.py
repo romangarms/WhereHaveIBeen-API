@@ -16,7 +16,10 @@ timelinePath is the recorded position and is always used. visit and
 activity segments carry Google's inferred places, which in real exports are
 sometimes hundreds of kilometres off, so they only stand in for spans that no
 path point covers. A point that would need more than OUTLIER_MAX_KMH to reach
-from the last kept one is dropped unless the following points agree with it.
+from the last kept one is dropped unless the following points agree with it,
+and so is a point mid-flight that the track leaves as fast as it arrived while
+sitting far off the line between its neighbours: Google slips the phone's
+stale location into a flight path, which would draw the flight doubling back.
 
 The export carries no speed, and a plane with the phone awake leaves path
 points every few minutes that are closer together than the 100 km jump rule,
@@ -36,6 +39,8 @@ from track import Fix, haversine_km
 OUTLIER_MIN_KM = 50.0
 OUTLIER_MAX_KMH = 1500.0
 OUTLIER_LOOKAHEAD = 3
+BACKTRACK_MIN_KMH = 400.0
+BACKTRACK_DETOUR = 1.5
 # Path offsets are whole minutes, so speed is measured over at least this
 # long to keep two points a minute apart from reading as a jet.
 SPEED_WINDOW_S = 300.0
@@ -183,10 +188,33 @@ def _implausible(a, b):
     return hours <= 0 or km / hours > OUTLIER_MAX_KMH
 
 
+def _kmh(a, b):
+    km = haversine_km(a.lat, a.lon, b.lat, b.lon)
+    hours = (b.tst - a.tst) / 3600.0
+    return km / hours if hours > 0 else float("inf")
+
+
+def _detour(a, b, c):
+    ab = haversine_km(a.lat, a.lon, b.lat, b.lon)
+    bc = haversine_km(b.lat, b.lon, c.lat, c.lon)
+    if ab <= OUTLIER_MIN_KM or bc <= OUTLIER_MIN_KM:
+        return False
+    ac = haversine_km(a.lat, a.lon, c.lat, c.lon)
+    return (ab + bc > BACKTRACK_DETOUR * ac
+            and _kmh(a, b) > BACKTRACK_MIN_KMH and _kmh(b, c) > BACKTRACK_MIN_KMH)
+
+
+def _backtrack(a, b, window):
+    """Three points alone cannot say whether b or the point after it is the
+    stale one, so b must be a detour against each of the next few."""
+    return bool(window) and all(_detour(a, b, c) for c in window)
+
+
 def _drop_outliers(fixes):
     """Drop a fix the last kept one could not have reached, unless most of the
     next few fixes sit near it (then it is a real relocation and the earlier
-    fix was the odd one)."""
+    fix was the odd one), and a fix the track only visits at jet speed as a
+    detour between its neighbours."""
     kept = []
     dropped = 0
     for i, f in enumerate(fixes):
@@ -197,6 +225,9 @@ def _drop_outliers(fixes):
             if not window or near * 2 < len(window):
                 dropped += 1
                 continue
+        if kept and _backtrack(kept[-1], f, fixes[i + 1:i + 1 + OUTLIER_LOOKAHEAD]):
+            dropped += 1
+            continue
         kept.append(f)
     return kept, dropped
 
