@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 from shapely.geometry import mapping
 
+import imports
 import recorder
 import track
 from config import Config
@@ -50,7 +51,7 @@ CACHE_PATH = Config.AGGREGATE_CACHE_PATH
 # A fingerprint of every config value that changes the OUTPUT geometry. If any
 # of these change, a persisted cache from an older config is treated as stale.
 PARAMS_FINGERPRINT = "|".join(str(x) for x in [
-    "stats-v3",  # bump when the output shape changes (e.g. added stats properties)
+    "stats-v4",  # bump when the output shape changes (e.g. added stats properties)
     FROM_DATE, WINDOW_DAYS, BUFFER_M, SIMPLIFY_M, OUT_SIMPLIFY_M,
     ACC_MAX_M, MIN_DIST_M, FLIGHT_SPEED_KMH, FLIGHT_JUMP_KM,
 ])
@@ -86,6 +87,11 @@ def _segments_to_feature(segments):
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+def _fix_points(fixes):
+    return [{"lat": f.lat, "lon": f.lon, "tst": f.tst, "vel": f.vel, "alt": f.alt, "acc": f.acc}
+            for f in fixes]
+
+
 def compute_union():
     """Read every user's track, buffer per-user, dissolve into one Feature."""
     t0 = time.time()
@@ -95,8 +101,10 @@ def compute_union():
     max_vel = 0.0
     max_alt = 0.0
     users = recorder.list_users()
+    covered = {}
     log.info("aggregate: computing over %d users", len(users))
     for user in users:
+        buckets = covered.setdefault(user.lower(), set())
         try:
             devices = recorder.list_devices(user)
         except Exception as e:
@@ -121,7 +129,19 @@ def compute_union():
                         max_vel = v
                     if a is not None and a > max_alt:
                         max_alt = a
+                    if p.get("tst") is not None:
+                        buckets.add(imports.bucket(p["tst"]))
                 all_segments.extend(filter_to_segments(pts))
+
+    # Imported history joins under the same recorder-wins rule as the per-user
+    # track, so nothing is counted twice on a day the recorder covered.
+    for user in imports.usernames():
+        for source in imports.list_imports(user):
+            fixes, _ = imports.select(imports.load_fixes(user, source), None, True,
+                                      now.timestamp(), covered.get(user.lower(), set()))
+            if not fixes:
+                continue
+            all_segments.extend(filter_to_segments(_fix_points(fixes)))
 
     feature, area_km2 = _segments_to_feature(all_segments)
     # Attach aggregate stats. These are single scalars across the whole

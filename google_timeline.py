@@ -18,10 +18,13 @@ sometimes hundreds of kilometres off, so they only stand in for spans that no
 path point covers. A point that would need more than OUTLIER_MAX_KMH to reach
 from the last kept one is dropped unless the following points agree with it.
 
-Every point becomes a Fix with vel/alt 0 unless the source carries them, so
-flight detection relies on the >100 km jump rule between consecutive fixes.
-Timestamps are made strictly increasing (ties pushed forward one second) so
-the streaming tracker keeps points that share a minute offset.
+The export carries no speed, and a plane with the phone awake leaves path
+points every few minutes that are closer together than the 100 km jump rule,
+so each fix gets a speed from its displacement over at least SPEED_WINDOW_S
+(the slower of before and across it). It only steers flight detection: the
+per-user stats report speed and altitude from the recorder alone. Timestamps are made strictly
+increasing (ties pushed forward one second) so the streaming tracker keeps
+points that share a minute offset.
 """
 
 import bisect
@@ -33,6 +36,9 @@ from track import Fix, haversine_km
 OUTLIER_MIN_KM = 50.0
 OUTLIER_MAX_KMH = 1500.0
 OUTLIER_LOOKAHEAD = 3
+# Path offsets are whole minutes, so speed is measured over at least this
+# long to keep two points a minute apart from reading as a jet.
+SPEED_WINDOW_S = 300.0
 
 _GEO = re.compile(r'^\s*geo:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$')
 
@@ -195,6 +201,35 @@ def _drop_outliers(fixes):
     return kept, dropped
 
 
+def _speed(a, b):
+    hours = max(b.tst - a.tst, SPEED_WINDOW_S) / 3600.0
+    return haversine_km(a.lat, a.lon, b.lat, b.lon) / hours
+
+
+def _derive_speeds(fixes):
+    """Speed of each fix: the smaller of the displacement speeds over the
+    SPEED_WINDOW_S before it and across it. A real flight is fast on both; a
+    stray point is slow across itself, and slow before it when it is the far
+    endpoint of an earlier fix's window. The leg after the fix is left out so
+    a flight's last point before a quiet gap still reads as airborne.
+    Anything faster than a jet is a data error and reads as 0; the jump rule
+    still classifies the gap."""
+    n = len(fixes)
+    out = []
+    for i, f in enumerate(fixes):
+        k = i
+        while k > 0 and f.tst - fixes[k].tst < SPEED_WINDOW_S:
+            k -= 1
+        m = i
+        while m < n - 1 and fixes[m].tst - f.tst < SPEED_WINDOW_S:
+            m += 1
+        kmh = _speed(fixes[k], fixes[m])
+        if k < i:
+            kmh = min(kmh, _speed(fixes[k], f))
+        out.append(f._replace(vel=kmh if kmh <= OUTLIER_MAX_KMH else 0.0))
+    return out
+
+
 def parse(data):
     """Decoded export JSON -> (fixes sorted by strictly increasing tst, meta).
     Raises TimelineFormatError when the layout is not recognised."""
@@ -216,6 +251,8 @@ def parse(data):
     else:
         fixes, counts = _parse_segments(items)
     fixes, counts["outliers"] = _drop_outliers(_monotonic(fixes))
+    if not any(f.vel for f in fixes):
+        fixes = _derive_speeds(fixes)
     meta = {"layout": layout, "segments": len(items), "counts": counts, "points": len(fixes)}
     if fixes:
         meta["first_tst"] = int(fixes[0].tst)

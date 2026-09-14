@@ -73,7 +73,7 @@ def test_parse_semantic_segments():
     assert all(b.tst > a.tst for a, b in zip(fixes, fixes[1:]))
     assert fixes[0].tst == T0 and fixes[1].tst == T0 + 300 and fixes[2].tst == T0 + 301
     assert meta["first_tst"] == T0
-    assert all(f.vel == 0 and f.alt == 0 and f.acc is None for f in fixes)
+    assert all(f.alt == 0 and f.acc is None for f in fixes)
 
 
 def test_parse_wrapped_and_records():
@@ -106,6 +106,61 @@ def test_outlier_spike_dropped_but_relocation_kept():
     fixes, meta = google_timeline.parse(segs)
     assert meta["counts"]["outliers"] == 1
     assert [round(f.lat, 2) for f in fixes] == [20.9, 20.9, 20.9, 47.6, 47.6, 47.6]
+
+
+def test_derived_speed_flags_inflight_path_points():
+    """Points every 6 minutes at cruise speed are closer than the jump rule but
+    must still read as a flight; a freeway drive must not."""
+    cruise = path_segment(T0, [(6 * i, 47.0 + i * 0.75, -122.0) for i in range(8)])  # ~83 km/6 min
+    # The drive away from the airport starts where the flight ended, half an hour later.
+    freeway = path_segment(T0 + 72 * 60, [(i, 52.25 + i * 0.018, -122.0) for i in range(30)])  # ~2 km/min
+    fixes, _ = google_timeline.parse([cruise, freeway])
+    cruise_fixes, freeway_fixes = fixes[:8], fixes[8:]
+    assert all(f.vel > 800 for f in cruise_fixes[:-1])
+    assert 100 < cruise_fixes[-1].vel < 322      # slow across the wait, still above exit speed
+    assert all(f.vel < 130 for f in freeway_fixes[1:])
+    from track import detect_flights
+    intervals, _, _ = detect_flights(fixes)
+    assert intervals == [[cruise_fixes[0].tst, cruise_fixes[-1].tst]]
+
+
+def test_derived_speed_is_measured_across_a_stray_point():
+    # A 30 km stray point in the middle of a town drive: the speed is taken
+    # between its neighbours, so it neither reads as a jet nor lifts the
+    # driving top speed; it is dropped by the thinning as a spike instead.
+    pts = [(i, 47.0 + i * 0.003, -122.0) for i in range(20)]
+    pts[10] = (10, 47.30, -122.0)
+    fixes, _ = google_timeline.parse([path_segment(T0, pts)])
+    from track import DEFAULT_FLIGHT_PARAMS, detect_flights
+    assert max(f.vel for f in fixes) < DEFAULT_FLIGHT_PARAMS.entry_kmh
+    assert detect_flights(fixes)[0] == []
+    # A physically impossible reading (bad timestamps) is zeroed, not reported.
+    far = [(0, 47.0, -122.0), (1, 47.0, -122.0), (2, 47.0, -122.0),
+           (60, 60.0, -100.0), (61, 60.0, -100.0), (62, 60.0, -100.0)]
+    fixes, _ = google_timeline.parse([path_segment(T0, far)])
+    assert max(f.vel for f in fixes) == 0
+
+
+def test_derived_speed_ignores_same_minute_hops():
+    # Two points 2 km apart that share a minute offset must not read as 7200 km/h.
+    seg = path_segment(T0, [(0, 47.0, -122.0), (5, 47.02, -122.0), (5, 47.038, -122.0),
+                            (10, 47.05, -122.0)])
+    fixes, _ = google_timeline.parse([seg])
+    assert max(f.vel for f in fixes) < 60
+
+
+def test_payload_stats_ignore_imported_speeds():
+    spec = track_cache.Spec("track", "carol", ["phone"], import_sources=["google-timeline"])
+    entry = track_cache.Entry(spec)
+    entry.computed_at = 1.0
+    entry.trackers["phone"].max_vel_driving = 120.0
+    entry.trackers["import:google-timeline"].max_vel_driving = 999.0
+    entry.trackers["import:google-timeline"].max_vel_flying = 990.0
+    entry.trackers["import:google-timeline"].driving_km = 50.0
+    stats = track_cache.payload(entry)["stats"]
+    assert stats["driving"]["max_vel_kmh"] == 120.0
+    assert stats["flying"]["max_vel_kmh"] == 0.0
+    assert stats["driving"]["distance_km"] == 50.0
 
 
 def test_select_skips_recorder_days():

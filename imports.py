@@ -43,6 +43,15 @@ def source_of(device):
     return device[len(DEVICE_PREFIX):]
 
 
+def usernames():
+    """Every user with at least one stored import."""
+    try:
+        names = os.listdir(IMPORT_DIR)
+    except FileNotFoundError:
+        return []
+    return sorted(n for n in names if _SAFE_USERNAME.match(n) and list_imports(n))
+
+
 def _user_dir(username):
     if not _SAFE_USERNAME.match(username):
         raise ValueError("username is not a safe path segment")

@@ -486,6 +486,8 @@ def payload(entry):
             })
     flights.sort(key=lambda f: f["properties"]["start_tst"])
     ts = list(trackers.values())
+    # Imported speeds are estimates that only steer flight detection.
+    measured = [t for d, t in trackers.items() if not imports.is_import_device(d)]
     base.update({
         "buffer_m": spec.buffer_m,
         "driving": _feature(driving),
@@ -495,14 +497,14 @@ def payload(entry):
             "driving": {
                 "distance_km": round(sum(t.driving_km for t in ts), 1),
                 "area_km2": round(driving_area, 1),
-                "max_alt_m": round(max([t.max_alt_driving for t in ts] or [0.0]), 1),
-                "max_vel_kmh": round(max([t.max_vel_driving for t in ts] or [0.0]), 1),
+                "max_alt_m": round(max([t.max_alt_driving for t in measured] or [0.0]), 1),
+                "max_vel_kmh": round(max([t.max_vel_driving for t in measured] or [0.0]), 1),
             },
             "flying": {
                 "distance_km": round(sum(t.flying_km for t in ts), 1),
                 "area_km2": round(flights_area, 1),
-                "max_alt_m": round(max([t.max_alt_flying for t in ts] or [0.0]), 1),
-                "max_vel_kmh": round(max([t.max_vel_flying for t in ts] or [0.0]), 1),
+                "max_alt_m": round(max([t.max_alt_flying for t in measured] or [0.0]), 1),
+                "max_vel_kmh": round(max([t.max_vel_flying for t in measured] or [0.0]), 1),
             },
         },
     })

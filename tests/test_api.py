@@ -6,6 +6,7 @@ from conftest import basic
 from synthetic import journey, points
 
 import aggregate
+import imports
 import recorder
 import track_cache
 
@@ -199,7 +200,30 @@ def test_aggregate_gains_area_km2(monkeypatch):
     assert set(feature["properties"]) == {"max_vel", "max_alt", "distance_km", "area_km2"}
     assert feature["properties"]["area_km2"] > 0
     assert feature["properties"]["max_vel"] == 850
-    assert "stats-v3" in aggregate.PARAMS_FINGERPRINT
+    assert "stats-v4" in aggregate.PARAMS_FINGERPRINT
+
+
+def test_aggregate_includes_imports_where_recorder_has_none(monkeypatch):
+    from google_timeline import parse as parse_timeline
+    from test_imports import old_history
+    fixes, _ = journey()
+    base = 1_722_470_400  # 2024-08-01, inside AGGREGATE_FROM
+    pts = points([f._replace(tst=f.tst + base) for f in fixes])
+    monkeypatch.setattr(recorder, "list_users", lambda: ["alice"])
+    monkeypatch.setattr(recorder, "list_devices", lambda u: ["phone"])
+    monkeypatch.setattr(recorder, "fetch_points",
+                        lambda u, d, f, t: [p for p in pts if f.timestamp() <= p["tst"] <= t.timestamp()])
+    without = aggregate.compute_union()["properties"]
+
+    imported, meta = parse_timeline(old_history(base))
+    imports.save("alice", "google-timeline", imported, meta)
+    try:
+        with_import = aggregate.compute_union()["properties"]
+    finally:
+        imports.delete("alice", "google-timeline")
+    # The 2-year-old drive adds area and distance; the fix on a recorder day does not.
+    assert with_import["area_km2"] > without["area_km2"]
+    assert with_import["distance_km"] == pytest.approx(without["distance_km"] + 11.1, abs=0.3)
 
 
 def _warm_all_time(client):
