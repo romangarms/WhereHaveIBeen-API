@@ -44,6 +44,9 @@ INLINE_WINDOW_DAYS = Config.TRACK_INLINE_WINDOW_DAYS
 MIN_REFRESH_SECONDS = Config.TRACK_MIN_REFRESH_SECONDS
 
 FETCH_WINDOW_DAYS = 30
+# Imported points are far sparser than the recorder's, so wider slices keep
+# each batch large enough to buffer in parallel.
+IMPORT_WINDOW_DAYS = 180
 # Windows are fetched concurrently (I/O bound) and consumed in order.
 FETCH_WORKERS = 4
 # The recorder reads from/to as UTC but at minute granularity; fetch wider and
@@ -327,6 +330,18 @@ def _apply(entry, inc):
     return changed
 
 
+def _import_windows(fixes, lower, upper):
+    """[start, end) tst windows of IMPORT_WINDOW_DAYS spanning the fixes in
+    range, so an import folds in and reports progress in slices like the
+    recorder instead of as one step."""
+    inside = [f.tst for f in fixes if f.tst <= upper and (lower is None or f.tst >= lower)]
+    if not inside:
+        return []
+    step = IMPORT_WINDOW_DAYS * 86400
+    end = inside[-1] + 1
+    return [(s, min(s + step, end)) for s in range(int(inside[0]), int(end), step)]
+
+
 def update(entry, now_ts):
     """Fetch every point newer than the entry knows about and fold it in."""
     spec = entry.spec
@@ -370,8 +385,10 @@ def update(entry, now_ts):
         for ws, we in recorder.windows(start - FETCH_MARGIN, end + FETCH_MARGIN, FETCH_WINDOW_DAYS):
             plan.append((device, ws, we))
 
+    import_fixes = {s: imports.load_fixes(spec.username, s) for s in spec.import_sources}
+    import_windows = {s: _import_windows(f, lower, upper) for s, f in import_fixes.items()}
     entry.progress = {"stage": "fetching", "done": 0,
-                      "total": len(plan) + len(spec.import_sources) + 1}
+                      "total": len(plan) + sum(len(w) for w in import_windows.values()) + 1}
     try:
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             futures = [pool.submit(recorder.fetch_points, user, d, ws, we) for d, ws, we in plan]
@@ -389,16 +406,24 @@ def update(entry, now_ts):
                     fold(device, fixes)
                 entry.progress["done"] += 1
 
+        entry.progress["stage"] = "importing"
         for source in spec.import_sources:
-            fixes, skipped = imports.select(imports.load_fixes(spec.username, source),
-                                            lower, lower_inclusive, upper, covered)
+            fixes, skipped = imports.select(import_fixes[source], lower, lower_inclusive,
+                                            upper, covered)
             stats = entry.import_stats.setdefault(source, {"points": 0, "skipped": 0})
             stats["points"] += len(fixes)
             stats["skipped"] += skipped
-            if fixes:
-                fetched += len(fixes)
-                fold(imports.device_name(source), fixes)
-            entry.progress["done"] += 1
+            fetched += len(fixes)
+            device = imports.device_name(source)
+            i = 0
+            for _, we in import_windows[source]:
+                j = i
+                while j < len(fixes) and fixes[j].tst < we:
+                    j += 1
+                if j > i:
+                    fold(device, fixes[i:j])
+                i = j
+                entry.progress["done"] += 1
 
         entry.progress["stage"] = "building"
         if spec.kind == "track":
@@ -408,6 +433,7 @@ def update(entry, now_ts):
             if changed or entry.computed_at is None:
                 entry.driving_area = track.geometry_area_km2(entry.driving)
                 entry.flights_area = track.geometry_area_km2(entry.flights_buffer)
+        entry.progress["done"] += 1
     finally:
         entry.progress = None
 

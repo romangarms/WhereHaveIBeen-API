@@ -229,8 +229,9 @@ the two geometries are `Polygon`, `MultiPolygon` or `null`.
 **`202`** `{"status": "computing", "progress": {"stage": "fetching", "done": 12, "total": 27}}`
 with a `Retry-After` header means the result is not cached yet and a
 background compute is running; poll the same URL. `progress` counts recorder
-fetch windows plus one final "building" step and is omitted before the
-compute has started. Full-history requests always start this way; ranges of
+fetch windows (`stage` `fetching`), then slices of any import (`importing`),
+then one final `building` step, and is omitted before the compute has
+started. Full-history requests always start this way; ranges of
 about a month or less compute inline.
 
 Caching: one entry per (user, devices, buffer, range) under

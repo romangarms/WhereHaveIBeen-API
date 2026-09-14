@@ -69,3 +69,14 @@ def test_chunking_keeps_polyline_connected():
     assert len(geom.geoms) == 1
     length_km = track.haversine_km(37.6, -122.4, 40.6, -73.8)
     assert abs(track.geometry_area_km2(geom) - length_km) / length_km < 0.05
+
+
+def test_piecewise_buffer_matches_whole_line_buffer():
+    # A self-crossing local drive far longer than one buffer piece.
+    line = [(-122.4 + 0.002 * math.sin(i / 3.0), 37.6 + 0.002 * math.cos(i / 7.0))
+            for i in range(4 * track.BUFFER_PIECE_VERTICES)]
+    pieced = track.merge_geometry(None, track.buffer_polylines([line], 100, 0, 0))
+    to_metric, to_wgs84 = track.build_transformers(*line[len(line) // 2])
+    whole = track.shapely_transform(
+        to_wgs84, track.shapely_transform(to_metric, track.LineString(line)).buffer(100, quad_segs=2))
+    assert pieced.symmetric_difference(whole).area / whole.area < 1e-3

@@ -16,6 +16,8 @@ All distances are haversine kilometres; coordinates are (lon, lat) WGS84.
 
 import copy
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -537,6 +539,30 @@ _GEOD = Geod(ellps="WGS84")
 # road trips) are densified along the geodesic and buffered in chunks.
 CHUNK_KM = 1000.0
 DENSIFY_KM = 200.0
+# GEOS buffer time grows with the self-intersections of one polyline, so a
+# chunk is buffered in short pieces (same projection, one shared vertex) that
+# the dissolve joins back together; the union of the pieces is the buffer of
+# the whole line.
+BUFFER_PIECE_VERTICES = 250
+
+
+def available_cpus():
+    """CPUs this process may use. Docker's --cpus is a cgroup quota that
+    os.cpu_count() and sched_getaffinity() do not see."""
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        if quota != "max":
+            return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+# GEOS releases the GIL, so threads are enough to use every core.
+_BUFFER_POOL = ThreadPoolExecutor(max_workers=available_cpus())
 
 
 def _chunks(coords):
@@ -578,9 +604,18 @@ def _split_antimeridian(poly):
     return _polygon_parts(west) + _polygon_parts(east)
 
 
+def _buffer_piece(coords_m, buffer_m, out_simplify_m):
+    poly = LineString(coords_m).buffer(buffer_m, quad_segs=2)
+    if out_simplify_m > 0:
+        poly = poly.simplify(out_simplify_m)
+    return poly
+
+
 def buffer_polylines(lines, buffer_m, simplify_m, out_simplify_m):
     """Buffer each polyline in local AEQD chunks. Returns WGS84 polygons."""
-    polys = []
+    # pyproj transformers are not thread-safe, so only the GEOS buffer runs
+    # on the pool; projection happens here.
+    jobs = []
     for coords in lines:
         if len(coords) < 2:
             continue
@@ -593,11 +628,15 @@ def buffer_polylines(lines, buffer_m, simplify_m, out_simplify_m):
                 line_m = line_m.simplify(simplify_m, preserve_topology=False)
             if line_m.is_empty:
                 continue
-            poly = line_m.buffer(buffer_m, quad_segs=2)
-            if out_simplify_m > 0:
-                poly = poly.simplify(out_simplify_m)
-            for part in _polygon_parts(shapely_transform(to_wgs84, poly)):
-                polys.extend(_split_antimeridian(part))
+            pts = list(line_m.coords)
+            for i in range(0, len(pts) - 1, BUFFER_PIECE_VERTICES):
+                piece = pts[i:i + BUFFER_PIECE_VERTICES + 1]
+                jobs.append((to_wgs84, _BUFFER_POOL.submit(
+                    _buffer_piece, piece, buffer_m, out_simplify_m)))
+    polys = []
+    for to_wgs84, future in jobs:
+        for part in _polygon_parts(shapely_transform(to_wgs84, future.result())):
+            polys.extend(_split_antimeridian(part))
     return polys
 
 
