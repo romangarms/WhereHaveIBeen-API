@@ -77,11 +77,15 @@ def filter_to_segments(points):
 
 
 def _segments_to_feature(segments):
-    """Buffer each segment in metres, dissolve all, simplify, return (Feature, area_km2)."""
-    geom, area_km2 = track.dissolve_segments(segments, BUFFER_M, SIMPLIFY_M, OUT_SIMPLIFY_M)
+    """Buffer each segment in metres, dissolve all, simplify, return (Feature, area_km2).
+    The area is geodesic, as in the per-user track, so a user's share of the
+    shape compares like with like; the single AEQD used for buffering
+    inflates area far from its centre."""
+    geom, _ = track.dissolve_segments(segments, BUFFER_M, SIMPLIFY_M, OUT_SIMPLIFY_M)
     if geom is None:
         return dict(_EMPTY_FEATURE), 0.0
-    return {"type": "Feature", "properties": {}, "geometry": mapping(geom)}, area_km2
+    return ({"type": "Feature", "properties": {}, "geometry": mapping(geom)},
+            track.geometry_area_km2(geom))
 
 
 # ---------------------------------------------------------------------------
